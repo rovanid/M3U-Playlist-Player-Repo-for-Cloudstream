@@ -111,6 +111,14 @@ class MyHomepage(val plugin: MyHomepagePlugin) : MainAPI() {
         }
     }
 
+    override suspend fun quickSearch(query: String): List<SearchResponse> {
+        return search(query, 1).items
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        return search(query, 1).items
+    }
+
     override suspend fun search(query: String, page: Int): SearchResponseList {
         val context = CloudStreamApp.context ?: plugin.activity ?: return emptyList<SearchResponse>().toNewSearchResponseList()
         val enabledPluginNames = MyHomepageStorageManager.getCurrentExtensions(context)
@@ -127,20 +135,8 @@ class MyHomepage(val plugin: MyHomepagePlugin) : MainAPI() {
             val provider = allProviders.find { it.name == pluginName } ?: return@mapNotNull null
             suspend {
                 try {
-                    val items = provider.search(query, 1)?.items
-                        ?: provider.search(query).orEmpty()
-
-                    items.map { item ->
-                        newMovieSearchResponse(
-                            "[$pluginName] ${item.name}",
-                            item.url,
-                        ) {
-                            this.posterUrl = item.posterUrl
-                            this.posterHeaders = item.posterHeaders
-                            this.quality = item.quality
-                            this.id = item.id
-                        }
-                    }
+                    val searchResult = provider.search(query, page)
+                    searchResult?.items ?: provider.search(query).orEmpty()
                 } catch (e: Exception) {
                     Log.e("MyHomepage", "Search failed for '$pluginName': ${e.message}")
                     emptyList<SearchResponse>()
@@ -152,16 +148,17 @@ class MyHomepage(val plugin: MyHomepagePlugin) : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val enabledPlugins = mainPage
-            .mapNotNull {
-                try {
-                    AppUtils.parseJson<SectionInfo>(it.data).pluginName
-                } catch (_: Exception) {
-                    null
-                }
-            }
+        val context = CloudStreamApp.context ?: plugin.activity
+        val enabledPluginNames = if (context != null) {
+            MyHomepageStorageManager.getCurrentExtensions(context)
+                .flatMap { it.sections?.asList() ?: emptyList() }
+                .filter { it.enabled }
+                .map { it.pluginName }
+                .distinct()
+        } else emptyList()
 
-        val providersToTry = MyHomepageUtils.getAllProviders().filter { it.name in enabledPlugins }
+        val allProviders = MyHomepageUtils.getAllProviders()
+        val providersToTry = allProviders.filter { it.name in enabledPluginNames }
 
         for (provider in providersToTry) {
             try {
