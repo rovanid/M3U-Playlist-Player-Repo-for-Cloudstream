@@ -231,7 +231,7 @@
     "name": "📺 xr3edTV",
     "internalName": "xr3edTV",
     "url": "https://raw.githubusercontent.com/xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream/builds/xr3edTV.cs3",
-    "version": 48,
+    "version": 49,
     "description": "Siaran Langsung Olahraga Realtime (Live Sports) dan Saluran TV 24/7 Nasional maupun Mancanegara",
     "authors": [
       "xr3ed"
@@ -243,7 +243,9 @@
     "apiVersion": 1,
     "status": 1,
     "language": "live",
-    "repositoryUrl": "https://github.com/xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream"
+    "repositoryUrl": "https://github.com/xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream",
+    "fileSize": 165807,
+    "fileHash": "sha256-baf361074436bfb60e038037408bd1217154c57f943cc12199a5fb863afa7320"
   },
   {
     "name": "GudangFilmXR",
@@ -307,7 +309,7 @@
     "name": "🏆 RBTV+",
     "internalName": "RBTVPlus",
     "url": "https://raw.githubusercontent.com/xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream/builds/RBTVPlus.cs3",
-    "version": 74,
+    "version": 75,
     "description": "Ekstensi Cloudstream untuk streaming olahraga langsung dari RBTV+",
     "authors": [
       "xr3ed"
@@ -319,7 +321,9 @@
     "apiVersion": 1,
     "status": 1,
     "language": "id",
-    "repositoryUrl": "https://github.com/xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream"
+    "repositoryUrl": "https://github.com/xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream",
+    "fileSize": 73609,
+    "fileHash": "sha256-388d2306641326b3db3c1dab4ea0ddeec98b525a83fe600ced304d180411cae0"
   },
   {
     "name": "HaruFilmXR",
