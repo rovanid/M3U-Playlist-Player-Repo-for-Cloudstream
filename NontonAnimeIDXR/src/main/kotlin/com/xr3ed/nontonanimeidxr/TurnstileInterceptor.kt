@@ -65,13 +65,17 @@ class TurnstileInterceptor : Interceptor {
         }
 
         fun isChallenge(response: Response): Boolean {
-            if (response.code == 403 || response.code == 503) return true
+            if (response.code != 403 && response.code != 503) return false
+            val server = response.header("Server").orEmpty().lowercase()
+            val cfMitigated = response.header("cf-mitigated").orEmpty().lowercase()
+            if (cfMitigated == "challenge") return true
             val peek = runCatching { response.peekBody(1024 * 32).string().lowercase() }.getOrNull() ?: ""
             return peek.contains("challenge-platform") ||
                    peek.contains("cf-browser-verification") ||
                    peek.contains("just a moment...") ||
                    peek.contains("enable javascript and cookies to continue") ||
-                   peek.contains("__cf_chl")
+                   peek.contains("__cf_chl") ||
+                   (server.contains("cloudflare") && peek.contains("turnstile"))
         }
 
         fun getValidActivity(): FragmentActivity? {
@@ -131,7 +135,6 @@ class TurnstileInterceptor : Interceptor {
         cookieManager.setAcceptCookie(true)
 
         var cookieHeader = currentCookies.ifBlank { getCfCookies(url) }
-        val hasClearance = cookieHeader.contains("cf_clearance=")
 
         val initialRequestBuilder = originalRequest.newBuilder()
             .header("User-Agent", USER_AGENT)
@@ -139,23 +142,27 @@ class TurnstileInterceptor : Interceptor {
             initialRequestBuilder.header("Cookie", cookieHeader)
         }
 
-        val response = if (hasClearance) {
-            try {
-                chain.proceed(initialRequestBuilder.build())
-            } catch (e: Exception) {
-                null
-            }
-        } else {
+        // Selalu coba kirim request terlebih dahulu!
+        val initialResponse = try {
+            chain.proceed(initialRequestBuilder.build())
+        } catch (e: Exception) {
             null
         }
 
-        if (response != null && !isChallenge(response)) {
-            return response
+        if (initialResponse != null && !isChallenge(initialResponse)) {
+            return initialResponse
         }
 
-        response?.close()
+        initialResponse?.close()
 
-        // Hapus cookie usang jika terdeteksi challenge
+        // Jika bukan domain NontonAnimeID (misal link extractor video), jangan tampilkan dialog Turnstile
+        val isTargetDomain = url.contains("nontonanimeid", ignoreCase = true)
+        if (!isTargetDomain) {
+            val fallbackReq = originalRequest.newBuilder().header("User-Agent", USER_AGENT).build()
+            return chain.proceed(fallbackReq)
+        }
+
+        // Hapus cookie usang jika terdeteksi challenge pada domain target
         synchronized(lock) {
             currentCookies = ""
             clearCfCookies(url)

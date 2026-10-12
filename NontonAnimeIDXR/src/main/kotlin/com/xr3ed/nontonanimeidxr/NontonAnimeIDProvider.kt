@@ -514,7 +514,11 @@ class NontonAnimeIDProvider : MainAPI() {
         iframeLinks.toList().amap { link ->
             val nestedLink = if (link.contains("/video-frame/") || link.contains("/video-embed/")) {
                 runCatching {
-                    request(link, ref = cleanData).document.selectFirst("iframe")?.let { iframe ->
+                    app.get(
+                        url = link,
+                        referer = cleanData,
+                        headers = mapOf("User-Agent" to TurnstileInterceptor.USER_AGENT)
+                    ).document.selectFirst("iframe")?.let { iframe ->
                         normalizeUrl(iframe.attr("data-src").ifEmpty { iframe.attr("src") })
                     }
                 }.getOrNull()
