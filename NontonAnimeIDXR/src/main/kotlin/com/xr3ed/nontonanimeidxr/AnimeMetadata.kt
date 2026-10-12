@@ -61,7 +61,12 @@ fun parseAnimeData(jsonString: String): MetaAnimeData? {
 // Fallback when the tracker returns no id (common for donghua, movies and new titles):
 // search AniList by title, then query ani.zip by id (ani.zip cannot search by title).
 
-data class AnimeIds(val malId: Int?, val aniId: Int?)
+data class AnimeIds(
+    val malId: Int?,
+    val aniId: Int?,
+    val bannerImage: String? = null,
+    val trailerUrl: String? = null
+)
 
 private val animeIdCache = ConcurrentHashMap<String, AnimeIds>()
 
@@ -72,7 +77,7 @@ private val tmdbLogoCache = ConcurrentHashMap<String, CacheBox<String>>()
 
 private const val ANILIST_SEARCH_QUERY =
     "query (\$search: String) { Page(perPage: 8) { media(search: \$search, type: ANIME, sort: SEARCH_MATCH) " +
-        "{ id idMal format seasonYear startDate { year } title { romaji english native } synonyms } } }"
+        "{ id idMal format seasonYear startDate { year } title { romaji english native } synonyms bannerImage trailer { id site } } } }"
 
 private fun titleKey(raw: String?): String =
     (raw ?: "").lowercase()
@@ -164,9 +169,18 @@ suspend fun resolveAnimeIds(
             val score = level * 10 - yearDiff
             if (score > bestScore) {
                 bestScore = score
+                val banner = m.optString("bannerImage").takeIf { it.isNotBlank() }
+                val trailerObj = m.optJSONObject("trailer")
+                val trailerUrl = if (trailerObj != null && trailerObj.optString("site").equals("youtube", true)) {
+                    val tid = trailerObj.optString("id")
+                    if (tid.isNotBlank()) "https://www.youtube.com/watch?v=$tid" else null
+                } else null
+
                 best = AnimeIds(
                     m.optInt("idMal", 0).takeIf { it > 0 },
-                    m.optInt("id", 0).takeIf { it > 0 }
+                    m.optInt("id", 0).takeIf { it > 0 },
+                    banner,
+                    trailerUrl
                 )
             }
         }

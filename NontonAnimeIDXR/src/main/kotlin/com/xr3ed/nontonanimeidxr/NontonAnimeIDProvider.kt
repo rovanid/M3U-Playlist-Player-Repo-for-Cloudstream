@@ -126,19 +126,37 @@ class NontonAnimeIDProvider : MainAPI() {
         val rawHref = fixUrlNull(a.attr("href")) ?: return null
         val maskedHref = maskUrl(rawHref)
 
-        val title = this.selectFirst("h3.title span, .title span, .as-anime-title, h2, .tt, h4, .entry-title, .title")?.text()?.trim()
+        val rawTitle = this.selectFirst("h3.title span, .title span, .as-anime-title, h2, .tt, h4, .entry-title, .title")?.text()?.trim()
             ?: this.selectFirst("img")?.attr("alt")?.trim()
             ?: a.attr("title").trim()
 
-        if (title.isBlank()) return null
+        if (rawTitle.isBlank()) return null
+
+        val title = rawTitle
+            .replace(Regex("(?i)^Nonton\\s+(?:Anime\\s+)?"), "")
+            .replace(Regex("(?i)\\s+Sub(?:title)?\\s+Indo(?:nesia)?"), "")
+            .trim()
 
         val imgEl = this.selectFirst("img")
-        val posterUrl = fixUrlNull(imgEl?.getImageAttr())
-        val isDub = title.contains("dub", true)
+        val posterUrl = imgEl?.getImageAttr()
+        val isDub = rawTitle.contains("dub", true)
 
-        return newAnimeSearchResponse(title, maskedHref, TvType.Anime) {
+        val epText = this.selectFirst(".epx, .eps, .dtla, .episode, span.episode, .as-anime-episode, .as-episode-title, span.ep, .bt .ep, .typez")?.text()
+        val epNum = Regex("(?i)(?:episode|eps|ep)\\s*(\\d+)").find(epText.orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("(?i)(?:episode|eps|ep)\\s*(\\d+)").find(rawTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("(\\d+)").find(epText.orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+        val typeText = this.selectFirst(".type, .typez, .typeseries")?.text().orEmpty()
+        val type = if (typeText.contains("Movie", true) || rawTitle.contains("Movie", true)) TvType.AnimeMovie else TvType.Anime
+
+        return newAnimeSearchResponse(title, maskedHref, type) {
             this.posterUrl = posterUrl
-            addDubStatus(dubExist = isDub, subExist = true)
+            this.quality = SearchQuality.HD
+            if (epNum != null) {
+                addSub(epNum)
+            } else {
+                addDubStatus(dubExist = isDub, subExist = true)
+            }
         }
     }
 
@@ -148,7 +166,7 @@ class NontonAnimeIDProvider : MainAPI() {
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
-        return document.select("article.animeseries, .animeseries, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx, .styles_itemContainer__GZ_z0, .as-anime-item")
+        return document.select("article.animeseries, .animeseries, a.as-anime-card, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx, .styles_itemContainer__GZ_z0, .as-anime-item, .ml-item, .latest-release article")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
     }
@@ -167,14 +185,29 @@ class NontonAnimeIDProvider : MainAPI() {
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
-        val title = document.selectFirst("h1.entry-title.cs, h1.entry-title, .entry-title")?.text()
-            ?.replace(Regex("^Nonton\\s+", RegexOption.IGNORE_CASE), "")
-            ?.replace(Regex("\\s+Sub\\s+Indo$", RegexOption.IGNORE_CASE), "")
+        val rawTitle = document.selectFirst("h1.entry-title.cs, h1.entry-title, .entry-title, h1")?.text()
+            ?.replace(Regex("(?i)^Nonton\\s+(?:Anime\\s+)?"), "")
+            ?.replace(Regex("(?i)\\s+Sub(?:title)?\\s+Indo(?:nesia)?$"), "")
             ?.trim()
             ?: return null
+        val title = rawTitle
 
-        val poster = document.selectFirst(".anime-card__sidebar img, .poster > img, .thumb > img, .single-info img")?.getImageAttr()
-        val tags = document.select(".anime-card__genres .genre-tag, .tagline > a, .genxed a, .genre-info a").map { it.text() }
+        // Poster situs
+        val sitePoster = document.selectFirst(
+            ".anime-card__sidebar img, .poster > img, .thumb > img, .single-info img, .infox .thumb img, meta[property='og:image']"
+        )?.getImageAttr()
+
+        // Backdrop / Background poster situs
+        val siteBackdrop = document.selectFirst(
+            ".bigcover img, .banner img, .anime-cover img, .cover img, .backdrop img, .single-info .backdrop img, div.bigcover"
+        )?.let { el ->
+            el.getImageAttr() ?: Regex("url\\(['\"]?(.*?)['\"]?\\)").find(el.attr("style"))?.groupValues?.getOrNull(1)
+        }
+
+        val tags = document.select(".anime-card__genres .genre-tag, .tagline > a, .genxed a, .genre-info a, a[rel='tag']")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
 
         val year = Regex("(19|20)\\d{2}").find(
             document.select(".details-list li:contains(Aired), .info-item.season, .bottomtitle, .info-content, .spe").text()
@@ -196,10 +229,19 @@ class NontonAnimeIDProvider : MainAPI() {
         )?.groupValues?.getOrNull(1)?.toDoubleOrNull()
             ?: document.select("span.nilaiseries, .rating strong, .score").text().trim().toDoubleOrNull()
 
-        val description = document.select(".synopsis-prose > p, .entry-content.seriesdesc > p, .desc > p, .entry-content > p")
-            .text()
-            .trim()
-        val trailer = document.selectFirst("a.trailerbutton, .trailer a")?.attr("href")
+        // Sinopsis patokan dari situs
+        val siteDescription = document.select(".synopsis-prose > p, .entry-content.seriesdesc > p, .desc > p, .entry-content > p, .synopsis-prose, .entry-content.seriesdesc, .entry-content, .desc")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() && !it.startsWith("Nonton anime", ignoreCase = true) && !it.contains("Streaming Anime", ignoreCase = true) }
+            .distinct()
+            .joinToString("\n\n")
+
+        // Trailer situs
+        val siteTrailer = document.selectFirst("a.trailerbutton, .trailer a, a[href*='youtube.com/watch'], a[href*='youtu.be'], iframe[src*='youtube.com/embed']")
+            ?.let { el ->
+                val link = el.attr("href").ifBlank { el.attr("src") }
+                if (link.contains("youtube.com") || link.contains("youtu.be")) fixUrl(link) else null
+            }
 
         val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year, true)
         val ids = resolveAnimeIds(listOf(title), type, year, tracker?.malId, tracker?.aniId?.toIntOrNull())
@@ -225,29 +267,45 @@ class NontonAnimeIDProvider : MainAPI() {
             tmdbId = tmdbid,
             appLangCode = "en"
         )
+        val logo = logoUrl ?: animeMetaData?.images?.find { it.coverType.equals("Clearlogo", true) || it.coverType.equals("Logo", true) }?.url
 
-        val backgroundposter = animeMetaData?.images?.find { it.coverType == "Fanart" }?.url ?: tracker?.cover
+        val finalPoster = sitePoster?.takeIf { it.isNotBlank() }
+            ?: tracker?.image
+            ?: animeMetaData?.images?.find { it.coverType == "Poster" }?.url
+            ?: tracker?.cover
 
-        val rawEpisodes = if (document.select(".episode-list-items a.episode-item").isNotEmpty()) {
-            document.select(".episode-list-items a.episode-item")
-                .mapNotNull {
-                    val epText = it.selectFirst(".ep-title, .episode-title, span")?.text()?.trim()
-                        ?: it.text().trim()
-                    val episode = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE)
-                        .find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                        ?: Regex("(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                    val link = it.attr("href").ifBlank { it.attr("data-episode-url") }
-                        .takeIf { v -> v.isNotBlank() }
-                        ?.let { v -> fixUrl(v) }
-                        ?: return@mapNotNull null
+        val backgroundposter = siteBackdrop?.takeIf { it.isNotBlank() }
+            ?: ids.bannerImage?.takeIf { it.isNotBlank() }
+            ?: animeMetaData?.images?.find { it.coverType == "Fanart" || it.coverType == "Banner" }?.url
+            ?: tracker?.cover
+            ?: finalPoster
 
-                    newEpisode(maskUrl(link)) { this.episode = episode }
+        val trailer = siteTrailer ?: ids.trailerUrl
+
+        // Daftar episode: patokan jumlah episode dari situs
+        val rawEpisodes = mutableListOf<Episode>()
+
+        val domEpElements = document.select(".episode-list-items a.episode-item, ul.misha_posts_wrap2 > li, .misha_posts_wrap > li, .lstepi > li, .episodelist > ul > li, .episodelist li, .singl-ep li")
+        if (domEpElements.isNotEmpty()) {
+            domEpElements.mapNotNullTo(rawEpisodes) { el ->
+                val a = if (el.tagName() == "a") el else el.selectFirst("a") ?: return@mapNotNullTo null
+                val link = fixUrlNull(a.attr("href").ifBlank { a.attr("data-episode-url") }) ?: return@mapNotNullTo null
+                val epText = a.selectFirst(".ep-title, .episode-title, span")?.text()?.trim() ?: a.text().trim()
+                val epNum = Regex("(?i)Episode\\s*(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?: Regex("(?i)Ep\\s*(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?: Regex("(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val cleanEpName = epText.replace(Regex("(?i)\\s+Sub(?:title)?\\s+Indo(?:nesia)?"), "").trim()
+                newEpisode(maskUrl(link)) {
+                    this.name = cleanEpName.ifBlank { "Episode ${epNum ?: 1}" }
+                    this.episode = epNum
                 }
-                .sortedBy { it.episode ?: Int.MAX_VALUE }
-        } else if (document.select("button.buttfilter").isNotEmpty()) {
+            }
+        }
+
+        if (rawEpisodes.isEmpty() && document.select("button.buttfilter, input[name=series_id]").isNotEmpty()) {
             val id = document.select("input[name=series_id]").attr("value")
             val numEp = document.selectFirst(".latestepisode > a")?.text()?.replace(Regex("\\D"), "")
-                .let { if (it.isNullOrBlank()) "1000" else it }
+                .let { if (it.isNullOrBlank()) "9999" else it }
             val ajaxHtml = runCatching {
                 app.post(
                     url = "$mainUrl/wp-admin/admin-ajax.php",
@@ -265,38 +323,35 @@ class NontonAnimeIDProvider : MainAPI() {
                 ).parsed<EpResponse>().content
             }.getOrNull()
 
-            if (ajaxHtml != null) {
-                Jsoup.parse(ajaxHtml).select("li").mapNotNull {
-                    val link = it.selectFirst("a")?.attr("href")?.let { v -> fixUrl(v) } ?: return@mapNotNull null
-                    val epText = it.selectFirst("a")?.text().orEmpty()
-                    val episode = Regex("Episode\\s?(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                    newEpisode(maskUrl(link)) { this.episode = episode }
-                }.reversed()
-            } else {
-                emptyList()
+            if (!ajaxHtml.isNullOrBlank()) {
+                Jsoup.parse(ajaxHtml).select("li").mapNotNullTo(rawEpisodes) { el ->
+                    val a = el.selectFirst("a") ?: return@mapNotNullTo null
+                    val link = fixUrlNull(a.attr("href")) ?: return@mapNotNullTo null
+                    val epText = a.text().trim()
+                    val epNum = Regex("(?i)Episode\\s*(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ?: Regex("(?i)Ep\\s*(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        ?: Regex("(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    val cleanEpName = epText.replace(Regex("(?i)\\s+Sub(?:title)?\\s+Indo(?:nesia)?"), "").trim()
+                    newEpisode(maskUrl(link)) {
+                        this.name = cleanEpName.ifBlank { "Episode ${epNum ?: 1}" }
+                        this.episode = epNum
+                    }
+                }
             }
-        } else {
-            document.select("ul.misha_posts_wrap2 > li, .lstepi > li, .episodelist > ul > li, .episodelist li").mapNotNull {
-                val a = it.selectFirst("a") ?: return@mapNotNull null
-                val link = fixUrl(a.attr("href"))
-                val epText = a.text()
-                val episode = Regex("Episode\\s?(\\d+)").find(epText)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                newEpisode(maskUrl(link)) { this.episode = episode }
-            }.reversed()
         }
 
-        val extractedEpisodes = if (rawEpisodes.isEmpty()) {
+        val sortedEpisodes = if (rawEpisodes.isNotEmpty()) {
+            rawEpisodes.distinctBy { it.data }.sortedBy { it.episode ?: Int.MAX_VALUE }
+        } else {
             listOf(
                 newEpisode(maskUrl(cleanUrl)) {
                     this.name = title
                     this.episode = 1
                 }
             )
-        } else {
-            rawEpisodes
         }
 
-        val episodes = extractedEpisodes.amap { ep ->
+        val episodes = sortedEpisodes.amap { ep ->
             var episodeNum = ep.episode
 
             if (type == TvType.AnimeMovie && episodeNum == null) {
@@ -305,15 +360,13 @@ class NontonAnimeIDProvider : MainAPI() {
 
             val episodeKey = episodeNum?.toString()
             val metaEp = if (episodeKey != null) animeMetaData?.episodes?.get(episodeKey) else null
-
-            val epOverview = metaEp?.overview
-            val finalOverview = epOverview?.takeIf { it.isNotBlank() }
+            val epOverview = metaEp?.overview?.takeIf { it.isNotBlank() }
 
             ep.apply {
                 this.name = if (type == TvType.AnimeMovie) {
                     animeMetaData?.titles?.get("en") ?: animeMetaData?.titles?.get("ja") ?: title
                 } else {
-                    metaEp?.title?.get("en") ?: metaEp?.title?.get("ja") ?: ep.name
+                    ep.name?.takeIf { it.isNotBlank() } ?: metaEp?.title?.get("en") ?: metaEp?.title?.get("ja") ?: "Episode $episodeNum"
                 }
                 this.episode = episodeNum
                 this.score = Score.from10(metaEp?.rating)
@@ -321,35 +374,39 @@ class NontonAnimeIDProvider : MainAPI() {
                     ?: animeMetaData?.images?.firstOrNull()?.url
                     ?: backgroundposter
                     ?: tracker?.image
-                    ?: poster
+                    ?: finalPoster
                     ?: ""
-                this.description = finalOverview
+                this.description = epOverview
                 this.addDate(metaEp?.airDateUtc)
                 this.runTime = metaEp?.runtime
             }
         }
 
-        val recommendations = document.select(".related a.as-anime-card, .result > li, .animeseries, .animposx, .bsx, .bs")
-            .mapNotNull { it.toSearchResult() }
+        // Rekomendasi
+        val recommendations = document.select(
+            ".related article, .related .animeseries, .related .bsx, .related a.as-anime-card, .relat article, .relat .bsx, .rekomendasi article, .rekomendasi .bsx, .similars article, div.relat article, aside#sidebar article"
+        ).mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
+            .ifEmpty {
+                document.select("article.animeseries, .animeseries, .animposx, .bsx").take(15)
+                    .mapNotNull { it.toSearchResult() }
+                    .filter { it.url != maskUrl(cleanUrl) }
+                    .distinctBy { it.url }
+            }
 
-        val apiDescription = animeMetaData?.description?.replace(Regex("<.*?>"), "")
+        val apiDescription = animeMetaData?.description?.replace(Regex("<.*?>"), "")?.trim()
         val rawPlot = apiDescription?.takeIf { it.isNotBlank() }
             ?: animeMetaData?.episodes?.get("1")?.overview?.takeIf { it.isNotBlank() }
             ?: fetchAniListPlot(malId, aniId)
 
-        val finalPlot = if (!rawPlot.isNullOrBlank()) {
-            rawPlot
-        } else {
-            description
-        }
+        val finalPlot = siteDescription.ifBlank { rawPlot.orEmpty() }
 
         return newAnimeLoadResponse(title, maskUrl(cleanUrl), type) {
             this.engName = animeMetaData?.titles?.get("en") ?: title
             this.japName = animeMetaData?.titles?.get("ja") ?: animeMetaData?.titles?.get("x-jat")
-            this.posterUrl = tracker?.image ?: poster
+            this.posterUrl = finalPoster
             this.backgroundPosterUrl = backgroundposter
-            try { this.logoUrl = logoUrl } catch (_: Throwable) {}
+            try { this.logoUrl = logo } catch (_: Throwable) {}
             this.year = year
             addEpisodes(DubStatus.Subbed, episodes)
             this.showStatus = status
