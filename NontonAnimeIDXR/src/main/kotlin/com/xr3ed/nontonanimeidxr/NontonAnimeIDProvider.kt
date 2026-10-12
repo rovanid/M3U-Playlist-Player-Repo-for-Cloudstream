@@ -68,13 +68,14 @@ class NontonAnimeIDProvider : MainAPI() {
             interceptor = turnstileInterceptor,
             headers = mapOf(
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                "User-Agent" to TurnstileInterceptor.USER_AGENT,
             ),
             referer = ref
         )
     }
 
     override val mainPage = mainPageOf(
+        "$mainUrl/" to "Episode Terbaru",
         "$mainUrl/anime/?mode=&sort=series_tahun_newest&status=Currently+Airing&type=" to "Ongoing Anime",
         "$mainUrl/anime/?mode=&sort=series_tahun_newest&status=Finished+Airing&type=" to "Complete Anime",
         "$mainUrl/anime/?mode=&sort=series_popularity&status=&type=" to "Most Popular",
@@ -106,11 +107,13 @@ class NontonAnimeIDProvider : MainAPI() {
             }
         }
 
-        val req = request(pageUrl)
+        val req = runCatching { request(pageUrl) }.getOrNull()
+        if (req == null) return newHomePageResponse(request.name, emptyList())
+
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
-        val home = document.select("article.animeseries, .animeseries, a.as-anime-card, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx")
+        val home = document.select("article.animeseries, .animeseries, a.as-anime-card, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx, .styles_itemContainer__GZ_z0, .as-anime-item")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
 
@@ -123,13 +126,14 @@ class NontonAnimeIDProvider : MainAPI() {
         val rawHref = fixUrlNull(a.attr("href")) ?: return null
         val maskedHref = maskUrl(rawHref)
 
-        val title = this.selectFirst("h3.title span, .title span, .as-anime-title, h2, .tt, h4, .entry-title")?.text()?.trim()
+        val title = this.selectFirst("h3.title span, .title span, .as-anime-title, h2, .tt, h4, .entry-title, .title")?.text()?.trim()
             ?: this.selectFirst("img")?.attr("alt")?.trim()
             ?: a.attr("title").trim()
 
         if (title.isBlank()) return null
 
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.getImageAttr())
+        val imgEl = this.selectFirst("img")
+        val posterUrl = fixUrlNull(imgEl?.getImageAttr())
         val isDub = title.contains("dub", true)
 
         return newAnimeSearchResponse(title, maskedHref, TvType.Anime) {
@@ -140,11 +144,11 @@ class NontonAnimeIDProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val link = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}"
-        val req = request(link)
+        val req = runCatching { request(link) }.getOrNull() ?: return emptyList()
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
-        return document.select("article.animeseries, .animeseries, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx")
+        return document.select("article.animeseries, .animeseries, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx, .styles_itemContainer__GZ_z0, .as-anime-item")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
     }
@@ -154,10 +158,12 @@ class NontonAnimeIDProvider : MainAPI() {
         val targetUrl = if (cleanUrl.contains("/anime/")) {
             cleanUrl
         } else {
-            request(cleanUrl).document.selectFirst("div.nvs.nvsc a, .breadcrumb a:contains(Anime)")?.attr("href") ?: cleanUrl
+            runCatching {
+                request(cleanUrl).document.selectFirst("div.nvs.nvsc a, .breadcrumb a:contains(Anime)")?.attr("href")
+            }.getOrNull() ?: cleanUrl
         }
 
-        val req = request(targetUrl)
+        val req = runCatching { request(targetUrl) }.getOrNull() ?: return null
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
@@ -254,7 +260,7 @@ class NontonAnimeIDProvider : MainAPI() {
                     ),
                     referer = targetUrl,
                     headers = mapOf(
-                        "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                        "User-Agent" to TurnstileInterceptor.USER_AGENT,
                     )
                 ).parsed<EpResponse>().content
             }.getOrNull()
@@ -365,7 +371,8 @@ class NontonAnimeIDProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val cleanData = unmaskUrl(data)
-        val document = request(cleanData).document
+        val req = runCatching { request(cleanData) }.getOrNull() ?: return false
+        val document = req.document
         val iframeLinks = linkedSetOf<String>()
 
         fun normalizeUrl(value: String?): String? {
@@ -436,7 +443,7 @@ class NontonAnimeIDProvider : MainAPI() {
                             headers = mapOf(
                                 "X-Requested-With" to "XMLHttpRequest",
                                 "Origin" to mainUrl,
-                                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                                "User-Agent" to TurnstileInterceptor.USER_AGENT,
                             )
                         ).text
                     }.getOrNull()
@@ -449,9 +456,11 @@ class NontonAnimeIDProvider : MainAPI() {
 
         iframeLinks.toList().amap { link ->
             val nestedLink = if (link.contains("/video-frame/") || link.contains("/video-embed/")) {
-                request(link, ref = cleanData).document.selectFirst("iframe")?.let { iframe ->
-                    normalizeUrl(iframe.attr("data-src").ifEmpty { iframe.attr("src") })
-                }
+                runCatching {
+                    request(link, ref = cleanData).document.selectFirst("iframe")?.let { iframe ->
+                        normalizeUrl(iframe.attr("data-src").ifEmpty { iframe.attr("src") })
+                    }
+                }.getOrNull()
             } else {
                 null
             }

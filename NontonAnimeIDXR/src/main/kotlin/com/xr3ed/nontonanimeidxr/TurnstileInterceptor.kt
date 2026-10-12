@@ -12,6 +12,15 @@ import java.util.concurrent.TimeUnit
 
 class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : Interceptor {
 
+    companion object {
+        const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        private val lock = Any()
+        @Volatile private var isDialogActive = false
+        @Volatile private var lastSuccessTime = 0L
+        @Volatile private var currentCookies = ""
+        private var currentLatch: CountDownLatch? = null
+    }
+
     private fun getResumedActivity(): android.app.Activity? {
         try {
             val activityThreadClass = Class.forName("android.app.ActivityThread")
@@ -49,13 +58,13 @@ class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : 
 
         cookieManager.setAcceptCookie(true)
 
-        val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
-        val existingCookies = cookieManager.getCookie(domainUrl) ?: ""
+        // Gunakan cookies yang tersimpan di memori atau CookieManager
+        val initialCookie = currentCookies.ifBlank { cookieManager.getCookie(domainUrl) ?: "" }
 
         val requestBuilder = originalRequest.newBuilder()
-            .header("User-Agent", userAgent)
-        if (existingCookies.isNotBlank()) {
-            requestBuilder.header("Cookie", existingCookies)
+            .header("User-Agent", USER_AGENT)
+        if (initialCookie.isNotBlank()) {
+            requestBuilder.header("Cookie", initialCookie)
         }
 
         val initialResponse = chain.proceed(requestBuilder.build())
@@ -65,31 +74,66 @@ class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : 
 
         initialResponse.close()
 
-        cookieManager.setCookie(domainUrl, "$targetCookie=; Max-Age=0; path=/; Secure")
-        cookieManager.setCookie(domainUrl, "cf_clearance=; Max-Age=0; path=/; Secure")
-        cookieManager.flush()
+        var needShowDialog = false
+        var latchToWait: CountDownLatch? = null
 
-        val resumedActivity = getResumedActivity() as? FragmentActivity
-        if (resumedActivity != null) {
-            val latch = CountDownLatch(1)
-            val handler = Handler(Looper.getMainLooper())
-            handler.post {
-                val dialog = NontonAnimeIDTurnstileDialog(url, targetCookie) {
-                    latch.countDown()
-                }
-                dialog.show(resumedActivity.supportFragmentManager, "NontonAnimeIDTurnstileDialog")
+        synchronized(lock) {
+            val now = System.currentTimeMillis()
+            // Jika baru saja berhasil diverifikasi dalam 30 detik terakhir, langsung pakai cookie terbaru
+            if (now - lastSuccessTime < 30_000L && currentCookies.isNotBlank()) {
+                val retryRequest = originalRequest.newBuilder()
+                    .header("User-Agent", USER_AGENT)
+                    .header("Cookie", currentCookies)
+                    .build()
+                return chain.proceed(retryRequest)
             }
-            try {
-                latch.await(120, TimeUnit.SECONDS)
-            } catch (e: Exception) {
-                e.printStackTrace()
+
+            if (isDialogActive) {
+                // Dialog sudah dibuka oleh request lain, request ini cukup menunggu latch yang sama
+                latchToWait = currentLatch
+            } else {
+                // Request ini menjadi leader yang membuka dialog
+                isDialogActive = true
+                currentLatch = CountDownLatch(1)
+                latchToWait = currentLatch
+                needShowDialog = true
             }
         }
 
-        val finalCookies = cookieManager.getCookie(domainUrl) ?: ""
+        if (needShowDialog) {
+            val resumedActivity = getResumedActivity() as? FragmentActivity
+            if (resumedActivity != null) {
+                Handler(Looper.getMainLooper()).post {
+                    val dialog = NontonAnimeIDTurnstileDialog(url, targetCookie) { success ->
+                        synchronized(lock) {
+                            if (success) {
+                                lastSuccessTime = System.currentTimeMillis()
+                                currentCookies = CookieManager.getInstance().getCookie(domainUrl) ?: ""
+                            }
+                            isDialogActive = false
+                            currentLatch?.countDown()
+                        }
+                    }
+                    dialog.show(resumedActivity.supportFragmentManager, "NontonAnimeIDTurnstileDialog")
+                }
+            } else {
+                synchronized(lock) {
+                    isDialogActive = false
+                    currentLatch?.countDown()
+                }
+            }
+        }
 
+        // Tunggu hingga dialog selesai diverifikasi
+        try {
+            latchToWait?.await(60, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        val finalCookies = currentCookies.ifBlank { cookieManager.getCookie(domainUrl) ?: "" }
         val finalRequestBuilder = originalRequest.newBuilder()
-            .header("User-Agent", userAgent)
+            .header("User-Agent", USER_AGENT)
         if (finalCookies.isNotBlank()) {
             finalRequestBuilder.header("Cookie", finalCookies)
         }

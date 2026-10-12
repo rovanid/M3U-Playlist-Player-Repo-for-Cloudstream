@@ -27,7 +27,7 @@ class NontonAnimeIDTurnstileDialog(
 ) : BottomSheetDialogFragment() {
 
     companion object {
-        private const val POLL_INTERVAL_MS = 2_000L
+        private const val POLL_INTERVAL_MS = 1_500L
         private const val POLL_TIMEOUT_MS  = 120_000L
     }
 
@@ -211,6 +211,7 @@ class NontonAnimeIDTurnstileDialog(
         wv.visibility = View.INVISIBLE
 
         wv.settings.apply {
+            userAgentString = TurnstileInterceptor.USER_AGENT
             javaScriptEnabled = true
             domStorageEnabled = true
             javaScriptCanOpenWindowsAutomatically = false
@@ -303,7 +304,7 @@ class NontonAnimeIDTurnstileDialog(
                 onFinished?.invoke(true)
                 dismissAllowingStateLoss()
             }
-        }, 1200)
+        }, 800)
     }
 
     override fun onDismiss(dialog: android.content.DialogInterface) {
