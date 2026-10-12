@@ -1,0 +1,99 @@
+package com.xr3ed.nontonanimeidxr
+
+import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
+import android.webkit.CookieManager
+import androidx.fragment.app.FragmentActivity
+import okhttp3.Interceptor
+import okhttp3.Response
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : Interceptor {
+
+    private fun getResumedActivity(): android.app.Activity? {
+        try {
+            val activityThreadClass = Class.forName("android.app.ActivityThread")
+            val currentActivityThreadMethod = activityThreadClass.getMethod("currentActivityThread")
+            val activityThread = currentActivityThreadMethod.invoke(null) ?: return null
+            val mActivitiesField = activityThreadClass.getDeclaredField("mActivities")
+            mActivitiesField.isAccessible = true
+            val activities = mActivitiesField.get(activityThread) as? Map<*, *> ?: return null
+            for (activityRecord in activities.values) {
+                if (activityRecord == null) continue
+                val pausedField = activityRecord.javaClass.getDeclaredField("paused")
+                pausedField.isAccessible = true
+                val paused = pausedField.get(activityRecord) as? Boolean ?: true
+                if (!paused) {
+                    val activityField = activityRecord.javaClass.getDeclaredField("activity")
+                    activityField.isAccessible = true
+                    val activity = activityField.get(activityRecord) as? android.app.Activity
+                    if (activity != null && !activity.isFinishing) {
+                        return activity
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return null
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val originalRequest = chain.request()
+        val url = originalRequest.url.toString()
+        val domainUrl = "${originalRequest.url.scheme}://${originalRequest.url.host}"
+        val cookieManager = CookieManager.getInstance()
+
+        cookieManager.setAcceptCookie(true)
+
+        val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
+        val existingCookies = cookieManager.getCookie(domainUrl) ?: ""
+
+        val requestBuilder = originalRequest.newBuilder()
+            .header("User-Agent", userAgent)
+        if (existingCookies.isNotBlank()) {
+            requestBuilder.header("Cookie", existingCookies)
+        }
+
+        val initialResponse = chain.proceed(requestBuilder.build())
+        if (initialResponse.code != 403 && initialResponse.code != 503) {
+            return initialResponse
+        }
+
+        initialResponse.close()
+
+        cookieManager.setCookie(domainUrl, "$targetCookie=; Max-Age=0; path=/; Secure")
+        cookieManager.setCookie(domainUrl, "cf_clearance=; Max-Age=0; path=/; Secure")
+        cookieManager.flush()
+
+        val resumedActivity = getResumedActivity() as? FragmentActivity
+        if (resumedActivity != null) {
+            val latch = CountDownLatch(1)
+            val handler = Handler(Looper.getMainLooper())
+            handler.post {
+                val dialog = NontonAnimeIDTurnstileDialog(url, targetCookie) {
+                    latch.countDown()
+                }
+                dialog.show(resumedActivity.supportFragmentManager, "NontonAnimeIDTurnstileDialog")
+            }
+            try {
+                latch.await(120, TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        val finalCookies = cookieManager.getCookie(domainUrl) ?: ""
+
+        val finalRequestBuilder = originalRequest.newBuilder()
+            .header("User-Agent", userAgent)
+        if (finalCookies.isNotBlank()) {
+            finalRequestBuilder.header("Cookie", finalCookies)
+        }
+
+        return chain.proceed(finalRequestBuilder.build())
+    }
+}

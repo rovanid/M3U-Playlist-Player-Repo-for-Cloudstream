@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.amap
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.nicehttp.NiceResponse
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -59,6 +60,20 @@ class NontonAnimeIDProvider : MainAPI() {
         }
     }
 
+    private val turnstileInterceptor = TurnstileInterceptor("cf_clearance")
+
+    private suspend fun request(url: String, ref: String? = null): NiceResponse {
+        return app.get(
+            url,
+            interceptor = turnstileInterceptor,
+            headers = mapOf(
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+            ),
+            referer = ref
+        )
+    }
+
     override val mainPage = mainPageOf(
         "$mainUrl/anime/?mode=&sort=series_tahun_newest&status=Currently+Airing&type=" to "Ongoing Anime",
         "$mainUrl/anime/?mode=&sort=series_tahun_newest&status=Finished+Airing&type=" to "Complete Anime",
@@ -91,11 +106,11 @@ class NontonAnimeIDProvider : MainAPI() {
             }
         }
 
-        val req = app.get(pageUrl)
+        val req = request(pageUrl)
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
-        val home = document.select("article.animeseries, .animeseries, a.as-anime-card, .result > ul > li, .result > li, .animposx, .animepost")
+        val home = document.select("article.animeseries, .animeseries, a.as-anime-card, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
 
@@ -108,7 +123,7 @@ class NontonAnimeIDProvider : MainAPI() {
         val rawHref = fixUrlNull(a.attr("href")) ?: return null
         val maskedHref = maskUrl(rawHref)
 
-        val title = this.selectFirst("h3.title span, .title span, .as-anime-title, h2, .tt, h4")?.text()?.trim()
+        val title = this.selectFirst("h3.title span, .title span, .as-anime-title, h2, .tt, h4, .entry-title")?.text()?.trim()
             ?: this.selectFirst("img")?.attr("alt")?.trim()
             ?: a.attr("title").trim()
 
@@ -125,11 +140,11 @@ class NontonAnimeIDProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val link = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}"
-        val req = app.get(link)
+        val req = request(link)
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
-        return document.select("article.animeseries, .animeseries, .result > ul > li, .result > li, .animposx, .animepost")
+        return document.select("article.animeseries, .animeseries, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
     }
@@ -139,10 +154,10 @@ class NontonAnimeIDProvider : MainAPI() {
         val targetUrl = if (cleanUrl.contains("/anime/")) {
             cleanUrl
         } else {
-            app.get(cleanUrl).document.selectFirst("div.nvs.nvsc a, .breadcrumb a:contains(Anime)")?.attr("href") ?: cleanUrl
+            request(cleanUrl).document.selectFirst("div.nvs.nvsc a, .breadcrumb a:contains(Anime)")?.attr("href") ?: cleanUrl
         }
 
-        val req = app.get(targetUrl)
+        val req = request(targetUrl)
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
@@ -230,11 +245,16 @@ class NontonAnimeIDProvider : MainAPI() {
             val ajaxHtml = runCatching {
                 app.post(
                     url = "$mainUrl/wp-admin/admin-ajax.php",
+                    interceptor = turnstileInterceptor,
                     data = mapOf(
                         "misha_number_of_results" to numEp,
                         "misha_order_by" to "date-DESC",
                         "action" to "mishafilter",
                         "series_id" to id
+                    ),
+                    referer = targetUrl,
+                    headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
                     )
                 ).parsed<EpResponse>().content
             }.getOrNull()
@@ -303,7 +323,7 @@ class NontonAnimeIDProvider : MainAPI() {
             }
         }
 
-        val recommendations = document.select(".related a.as-anime-card, .result > li, .animeseries, .animposx")
+        val recommendations = document.select(".related a.as-anime-card, .result > li, .animeseries, .animposx, .bsx, .bs")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
 
@@ -345,7 +365,7 @@ class NontonAnimeIDProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val cleanData = unmaskUrl(data)
-        val document = app.get(cleanData).document
+        val document = request(cleanData).document
         val iframeLinks = linkedSetOf<String>()
 
         fun normalizeUrl(value: String?): String? {
@@ -404,6 +424,7 @@ class NontonAnimeIDProvider : MainAPI() {
                     val response = runCatching {
                         app.post(
                             url = ajaxUrl,
+                            interceptor = turnstileInterceptor,
                             data = mapOf(
                                 "action" to "player_ajax",
                                 "nonce" to nonce,
@@ -415,6 +436,7 @@ class NontonAnimeIDProvider : MainAPI() {
                             headers = mapOf(
                                 "X-Requested-With" to "XMLHttpRequest",
                                 "Origin" to mainUrl,
+                                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
                             )
                         ).text
                     }.getOrNull()
@@ -427,7 +449,7 @@ class NontonAnimeIDProvider : MainAPI() {
 
         iframeLinks.toList().amap { link ->
             val nestedLink = if (link.contains("/video-frame/") || link.contains("/video-embed/")) {
-                app.get(link, referer = cleanData).document.selectFirst("iframe")?.let { iframe ->
+                request(link, ref = cleanData).document.selectFirst("iframe")?.let { iframe ->
                     normalizeUrl(iframe.attr("data-src").ifEmpty { iframe.attr("src") })
                 }
             } else {
