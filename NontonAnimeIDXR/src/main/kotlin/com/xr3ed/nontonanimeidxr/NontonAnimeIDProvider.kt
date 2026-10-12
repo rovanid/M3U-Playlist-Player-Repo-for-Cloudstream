@@ -113,7 +113,7 @@ class NontonAnimeIDProvider : MainAPI() {
         mainUrl = getBaseUrl(req.url)
         val document = req.document
 
-        val home = document.select("article.animeseries, .animeseries, a.as-anime-card, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx, .styles_itemContainer__GZ_z0, .as-anime-item")
+        val home = document.select("article.animeseries, .animeseries, a.as-anime-card, .result > ul > li, .result > li, .animposx, .animepost, .bsx, .bs, .listupd article, .listupd .bsx, .styles_itemContainer__GZ_z0, .as-anime-item, .ml-item, .latest-release article")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { it.url }
 
@@ -493,13 +493,14 @@ class NontonAnimeIDProvider : MainAPI() {
     }
 
     private fun Element.getImageAttr(): String? {
-        return when {
-            this.hasAttr("data-src") -> this.attr("abs:data-src")
-            this.hasAttr("data-lazy-src") -> this.attr("abs:data-lazy-src")
-            this.hasAttr("data-original") -> this.attr("abs:data-original")
+        val src = when {
+            this.hasAttr("data-src") -> this.attr("abs:data-src").ifBlank { this.attr("data-src") }
+            this.hasAttr("data-lazy-src") -> this.attr("abs:data-lazy-src").ifBlank { this.attr("data-lazy-src") }
+            this.hasAttr("data-original") -> this.attr("abs:data-original").ifBlank { this.attr("data-original") }
             this.hasAttr("srcset") -> this.attr("abs:srcset").substringBefore(" ")
-            else -> this.attr("abs:src")
+            else -> this.attr("abs:src").ifBlank { this.attr("src") }
         }
+        return fixUrlNull(src)
     }
 
     private data class EpResponse(

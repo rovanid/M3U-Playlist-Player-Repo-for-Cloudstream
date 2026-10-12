@@ -37,6 +37,15 @@ class NontonAnimeIDTurnstileDialog(
     private val handler = Handler(Looper.getMainLooper())
     private var cookiesSaved = false
     private var pollElapsedMs = 0L
+    private var initialClearance = ""
+
+    private fun extractClearance(cookieStr: String): String {
+        return cookieStr.split(";")
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("cf_clearance=") }
+            ?.substringAfter("cf_clearance=")
+            .orEmpty()
+    }
 
     private val cookiePollRunnable = object : Runnable {
         override fun run() {
@@ -44,9 +53,13 @@ class NontonAnimeIDTurnstileDialog(
 
             CookieManager.getInstance().flush()
             val cookieStr = TurnstileInterceptor.getCfCookies(targetUrl)
+            val currentClearance = extractClearance(cookieStr)
 
-            // Hanya anggap berhasil jika cf_clearance benar-benar sudah ada!
-            if (cookieStr.contains("cf_clearance=")) {
+            // Hanya anggap berhasil jika cf_clearance baru benar-benar sudah ada!
+            val isCleared = currentClearance.isNotEmpty() &&
+                (initialClearance.isEmpty() || currentClearance != initialClearance)
+
+            if (isCleared) {
                 saveCookiesAndDismiss()
             } else if (pollElapsedMs >= POLL_TIMEOUT_MS) {
                 updateStatus("⏱️ Waktu verifikasi habis. Silakan tutup dan coba lagi.")
@@ -59,24 +72,15 @@ class NontonAnimeIDTurnstileDialog(
     private fun scheduleNextPoll() {
         pollElapsedMs += POLL_INTERVAL_MS
         updateStatus("⏳ Menunggu verifikasi Cloudflare... (${pollElapsedMs / 1000}s)")
-
-        if (pollElapsedMs >= 1500L) {
-            (dialog as? com.google.android.material.bottomsheet.BottomSheetDialog)?.behavior?.apply {
-                skipCollapsed = true
-                peekHeight = android.view.WindowManager.LayoutParams.MATCH_PARENT
-                state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
-            }
-        }
-
         handler.postDelayed(cookiePollRunnable, POLL_INTERVAL_MS)
     }
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         val dialog = super.onCreateDialog(savedInstanceState)
         (dialog as? com.google.android.material.bottomsheet.BottomSheetDialog)?.behavior?.apply {
-            state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_COLLAPSED
-            skipCollapsed = false
-            peekHeight = 0
+            state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+            skipCollapsed = true
+            peekHeight = android.view.WindowManager.LayoutParams.MATCH_PARENT
         }
         return dialog
     }
@@ -174,11 +178,15 @@ class NontonAnimeIDTurnstileDialog(
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        TurnstileInterceptor.clearCfCookies(targetUrl)
+
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, true)
             flush()
         }
+
+        initialClearance = extractClearance(TurnstileInterceptor.getCfCookies(targetUrl))
 
         webView?.loadUrl(targetUrl)
         handler.postDelayed(cookiePollRunnable, POLL_INTERVAL_MS)
@@ -254,7 +262,14 @@ class NontonAnimeIDTurnstileDialog(
                 if (cookiesSaved) return
 
                 val currentHostCookies = TurnstileInterceptor.getCfCookies(targetUrl)
-                if (currentHostCookies.contains("cf_clearance=")) {
+                val currentClearance = extractClearance(currentHostCookies)
+                val pageTitle = view?.title.orEmpty().lowercase()
+                val isChallenge = pageTitle.contains("just a moment") || url.orEmpty().contains("__cf_chl")
+
+                val isCleared = currentClearance.isNotEmpty() &&
+                    (initialClearance.isEmpty() || currentClearance != initialClearance)
+
+                if (isCleared && !isChallenge) {
                     saveCookiesAndDismiss()
                     return
                 }
