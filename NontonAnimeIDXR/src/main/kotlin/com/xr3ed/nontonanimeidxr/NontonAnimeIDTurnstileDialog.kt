@@ -22,12 +22,11 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 
 class NontonAnimeIDTurnstileDialog(
     private val targetUrl: String,
-    private val targetCookie: String = "cf_clearance",
     private val onFinished: ((Boolean) -> Unit)? = null
 ) : BottomSheetDialogFragment() {
 
     companion object {
-        private const val POLL_INTERVAL_MS = 1_500L
+        private const val POLL_INTERVAL_MS = 1_000L
         private const val POLL_TIMEOUT_MS  = 120_000L
     }
 
@@ -39,23 +38,15 @@ class NontonAnimeIDTurnstileDialog(
     private var cookiesSaved = false
     private var pollElapsedMs = 0L
 
-    private val targetHost: String by lazy {
-        try {
-            val uri = android.net.Uri.parse(targetUrl)
-            "${uri.scheme}://${uri.host}"
-        } catch (_: Exception) {
-            targetUrl
-        }
-    }
-
     private val cookiePollRunnable = object : Runnable {
         override fun run() {
             if (cookiesSaved || !isAdded) return
 
             CookieManager.getInstance().flush()
-            val cookieStr = CookieManager.getInstance().getCookie(targetHost) ?: ""
+            val cookieStr = TurnstileInterceptor.getCfCookies(targetUrl)
 
-            if (cookieStr.contains(targetCookie) || cookieStr.contains("cf_clearance") || cookieStr.contains("__cf_bm")) {
+            // Hanya anggap berhasil jika cf_clearance benar-benar sudah ada!
+            if (cookieStr.contains("cf_clearance=")) {
                 saveCookiesAndDismiss()
             } else if (pollElapsedMs >= POLL_TIMEOUT_MS) {
                 updateStatus("⏱️ Waktu verifikasi habis. Silakan tutup dan coba lagi.")
@@ -69,7 +60,7 @@ class NontonAnimeIDTurnstileDialog(
         pollElapsedMs += POLL_INTERVAL_MS
         updateStatus("⏳ Menunggu verifikasi Cloudflare... (${pollElapsedMs / 1000}s)")
 
-        if (pollElapsedMs >= POLL_INTERVAL_MS) {
+        if (pollElapsedMs >= 1500L) {
             (dialog as? com.google.android.material.bottomsheet.BottomSheetDialog)?.behavior?.apply {
                 skipCollapsed = true
                 peekHeight = android.view.WindowManager.LayoutParams.MATCH_PARENT
@@ -113,11 +104,11 @@ class NontonAnimeIDTurnstileDialog(
     ): View {
         val screenH = requireContext().resources.displayMetrics.heightPixels
         val webViewHeight = (screenH * 0.70).toInt()
-        val topPadding = (screenH * 0.10).toInt()
+        val topPadding = (screenH * 0.08).toInt()
 
         val root = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), topPadding, dp(24), dp(24))
+            setPadding(dp(20), topPadding, dp(20), dp(20))
             setBackgroundColor(Color.parseColor("#151624"))
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -129,7 +120,7 @@ class NontonAnimeIDTurnstileDialog(
             text = "🛡️ Verifikasi Cloudflare NontonAnimeID"
             textSize = 18f
             setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(6))
         })
 
         statusText = TextView(requireContext()).apply {
@@ -141,21 +132,10 @@ class NontonAnimeIDTurnstileDialog(
         root.addView(statusText)
 
         root.addView(TextView(requireContext()).apply {
-            text = "Silakan centang kotak verifikasi Cloudflare jika diminta. Layar akan menutup otomatis setelah berhasil."
+            text = "Silakan centang kotak verifikasi Cloudflare jika diminta. Jendela akan menutup otomatis setelah cf_clearance berhasil didapatkan."
             textSize = 11f
             setTextColor(Color.parseColor("#707080"))
-            setPadding(0, 0, 0, dp(12))
-        })
-
-        root.addView(View(requireContext()).apply {
-            setBackgroundColor(Color.parseColor("#2C2C3E"))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(1)
-            ).apply {
-                topMargin = dp(8)
-                bottomMargin = dp(16)
-            }
+            setPadding(0, 0, 0, dp(10))
         })
 
         progressBar = ProgressBar(
@@ -166,7 +146,7 @@ class NontonAnimeIDTurnstileDialog(
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).also { it.bottomMargin = dp(12) }
+            ).also { it.bottomMargin = dp(10) }
         }
         root.addView(progressBar)
 
@@ -181,9 +161,9 @@ class NontonAnimeIDTurnstileDialog(
             webView,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                webViewHeight + dp(120)
+                webViewHeight + dp(100)
             ).apply {
-                topMargin = -dp(90)
+                topMargin = -dp(70)
             }
         )
         root.addView(wvContainer)
@@ -273,8 +253,8 @@ class NontonAnimeIDTurnstileDialog(
 
                 if (cookiesSaved) return
 
-                val currentHostCookies = CookieManager.getInstance().getCookie(targetHost) ?: ""
-                if (currentHostCookies.contains(targetCookie) || currentHostCookies.contains("cf_clearance") || currentHostCookies.contains("__cf_bm")) {
+                val currentHostCookies = TurnstileInterceptor.getCfCookies(targetUrl)
+                if (currentHostCookies.contains("cf_clearance=")) {
                     saveCookiesAndDismiss()
                     return
                 }
@@ -297,14 +277,14 @@ class NontonAnimeIDTurnstileDialog(
         webView?.visibility = View.GONE
         progressBar?.visibility = View.GONE
 
-        updateStatus("✅ Verifikasi Cloudflare berhasil!")
+        updateStatus("✅ Verifikasi Cloudflare (cf_clearance) berhasil!")
 
         handler.postDelayed({
             if (isAdded) {
                 onFinished?.invoke(true)
                 dismissAllowingStateLoss()
             }
-        }, 800)
+        }, 600)
     }
 
     override fun onDismiss(dialog: android.content.DialogInterface) {

@@ -7,10 +7,11 @@ import android.webkit.CookieManager
 import androidx.fragment.app.FragmentActivity
 import okhttp3.Interceptor
 import okhttp3.Response
+import java.net.URI
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : Interceptor {
+class TurnstileInterceptor : Interceptor {
 
     companion object {
         const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
@@ -19,6 +20,38 @@ class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : 
         @Volatile private var lastSuccessTime = 0L
         @Volatile private var currentCookies = ""
         private var currentLatch: CountDownLatch? = null
+
+        fun getCfCookies(url: String): String {
+            val cm = CookieManager.getInstance()
+            val full = cm.getCookie(url).orEmpty()
+            val base = runCatching {
+                val uri = URI(url)
+                val hostParts = uri.host.split(".")
+                if (hostParts.size >= 2) {
+                    val rootDomain = hostParts.takeLast(2).joinToString(".")
+                    cm.getCookie("${uri.scheme}://$rootDomain").orEmpty()
+                } else ""
+            }.getOrDefault("")
+
+            val map = mutableMapOf<String, String>()
+            "$full; $base".split(";").forEach {
+                val pair = it.trim().split("=", limit = 2)
+                if (pair.size == 2 && pair[0].isNotBlank()) {
+                    map[pair[0].trim()] = pair[1].trim()
+                }
+            }
+            return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        }
+
+        fun isChallenge(response: Response): Boolean {
+            if (response.code == 403 || response.code == 503) return true
+            val peek = runCatching { response.peekBody(1024 * 32).string().lowercase() }.getOrNull() ?: ""
+            return peek.contains("challenge-platform") ||
+                   peek.contains("cf-browser-verification") ||
+                   peek.contains("just a moment...") ||
+                   peek.contains("enable javascript and cookies to continue") ||
+                   peek.contains("__cf_chl")
+        }
     }
 
     private fun getResumedActivity(): android.app.Activity? {
@@ -53,46 +86,54 @@ class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : 
     override fun intercept(chain: Interceptor.Chain): Response {
         val originalRequest = chain.request()
         val url = originalRequest.url.toString()
-        val domainUrl = "${originalRequest.url.scheme}://${originalRequest.url.host}"
         val cookieManager = CookieManager.getInstance()
-
         cookieManager.setAcceptCookie(true)
 
-        // Gunakan cookies yang tersimpan di memori atau CookieManager
-        val initialCookie = currentCookies.ifBlank { cookieManager.getCookie(domainUrl) ?: "" }
+        var cookieHeader = currentCookies.ifBlank { getCfCookies(url) }
 
-        val requestBuilder = originalRequest.newBuilder()
+        // Jika sama sekali belum punya cf_clearance, jangan buang waktu request yang pasti diblokir
+        val hasClearance = cookieHeader.contains("cf_clearance=")
+
+        val initialRequestBuilder = originalRequest.newBuilder()
             .header("User-Agent", USER_AGENT)
-        if (initialCookie.isNotBlank()) {
-            requestBuilder.header("Cookie", initialCookie)
+        if (cookieHeader.isNotBlank()) {
+            initialRequestBuilder.header("Cookie", cookieHeader)
         }
 
-        val initialResponse = chain.proceed(requestBuilder.build())
-        if (initialResponse.code != 403 && initialResponse.code != 503) {
-            return initialResponse
+        val response = if (hasClearance) {
+            chain.proceed(initialRequestBuilder.build())
+        } else {
+            null
         }
 
-        initialResponse.close()
+        // Cek apakah respon valid dan bukan challenge
+        if (response != null && !isChallenge(response)) {
+            return response
+        }
+
+        response?.close()
 
         var needShowDialog = false
         var latchToWait: CountDownLatch? = null
 
         synchronized(lock) {
             val now = System.currentTimeMillis()
-            // Jika baru saja berhasil diverifikasi dalam 30 detik terakhir, langsung pakai cookie terbaru
-            if (now - lastSuccessTime < 30_000L && currentCookies.isNotBlank()) {
+            // Jika baru berhasil diverifikasi dalam 20 detik terakhir dan punya clearance, retry
+            if (now - lastSuccessTime < 20_000L && currentCookies.contains("cf_clearance=")) {
                 val retryRequest = originalRequest.newBuilder()
                     .header("User-Agent", USER_AGENT)
                     .header("Cookie", currentCookies)
                     .build()
-                return chain.proceed(retryRequest)
+                val retryResp = chain.proceed(retryRequest)
+                if (!isChallenge(retryResp)) {
+                    return retryResp
+                }
+                retryResp.close()
             }
 
             if (isDialogActive) {
-                // Dialog sudah dibuka oleh request lain, request ini cukup menunggu latch yang sama
                 latchToWait = currentLatch
             } else {
-                // Request ini menjadi leader yang membuka dialog
                 isDialogActive = true
                 currentLatch = CountDownLatch(1)
                 latchToWait = currentLatch
@@ -104,11 +145,12 @@ class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : 
             val resumedActivity = getResumedActivity() as? FragmentActivity
             if (resumedActivity != null) {
                 Handler(Looper.getMainLooper()).post {
-                    val dialog = NontonAnimeIDTurnstileDialog(url, targetCookie) { success ->
+                    val dialog = NontonAnimeIDTurnstileDialog(url) { success ->
                         synchronized(lock) {
-                            if (success) {
+                            val freshCookies = getCfCookies(url)
+                            if (success || freshCookies.contains("cf_clearance=")) {
                                 lastSuccessTime = System.currentTimeMillis()
-                                currentCookies = CookieManager.getInstance().getCookie(domainUrl) ?: ""
+                                currentCookies = freshCookies
                             }
                             isDialogActive = false
                             currentLatch?.countDown()
@@ -124,14 +166,13 @@ class TurnstileInterceptor(private val targetCookie: String = "cf_clearance") : 
             }
         }
 
-        // Tunggu hingga dialog selesai diverifikasi
         try {
             latchToWait?.await(60, TimeUnit.SECONDS)
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        val finalCookies = currentCookies.ifBlank { cookieManager.getCookie(domainUrl) ?: "" }
+        val finalCookies = currentCookies.ifBlank { getCfCookies(url) }
         val finalRequestBuilder = originalRequest.newBuilder()
             .header("User-Agent", USER_AGENT)
         if (finalCookies.isNotBlank()) {

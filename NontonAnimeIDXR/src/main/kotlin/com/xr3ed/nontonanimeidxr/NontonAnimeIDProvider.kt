@@ -60,7 +60,7 @@ class NontonAnimeIDProvider : MainAPI() {
         }
     }
 
-    private val turnstileInterceptor = TurnstileInterceptor("cf_clearance")
+    private val turnstileInterceptor = TurnstileInterceptor()
 
     private suspend fun request(url: String, ref: String? = null): NiceResponse {
         return app.get(
