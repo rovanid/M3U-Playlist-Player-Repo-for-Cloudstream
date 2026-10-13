@@ -369,7 +369,7 @@
     "name": "#Anime NontonAnimeIDXR",
     "internalName": "NontonAnimeIDXR",
     "url": "https://raw.githubusercontent.com/xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream/builds/NontonAnimeIDXR.cs3",
-    "version": 17,
+    "version": 18,
     "description": "NontonAnimeID — Streaming Anime Subtitle Indonesia (#Anime NontonAnimeIDXR)",
     "authors": [
       "xr3ed"
@@ -384,7 +384,7 @@
     "status": 1,
     "language": "id",
     "repositoryUrl": "https://github.com/xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream",
-    "fileSize": 124324,
-    "fileHash": "sha256-47543642503e9ecc68a7240791b7c21b054c45f596d850eb66afd7c8ce2c4aa1"
+    "fileSize": 129982,
+    "fileHash": "sha256-bf6aa92786b3a23feac759f732bad4b95ace28e2a8ce7fe0d7c52e75de698e12"
   }
 ]

@@ -498,7 +498,15 @@ class NontonAnimeIDProvider : MainAPI() {
         }
 
         // Find AJAX config (nonce & ajaxUrl)
-        val allScripts = document.select("script").joinToString("\n") { it.data().ifBlank { it.html() } }
+        val dataScripts = document.select("script[src*=\"base64,\"]").mapNotNull { el ->
+            val src = el.attr("src")
+            val b64 = src.substringAfter("base64,")
+            runCatching {
+                String(android.util.Base64.decode(b64, android.util.Base64.DEFAULT), Charsets.UTF_8)
+            }.getOrNull()
+        }.joinToString("\n")
+
+        val allScripts = (document.select("script").map { it.data().ifBlank { it.html() } } + dataScripts).joinToString("\n")
         var ajaxUrl = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"")
             .find(allScripts)
             ?.groupValues
@@ -526,8 +534,8 @@ class NontonAnimeIDProvider : MainAPI() {
                         data = mapOf(
                             "action" to "player_ajax",
                             "nonce" to nonce,
-                            "serverName" to server.type.lowercase(),
-                            "type" to server.type.lowercase(),
+                            "serverName" to server.type,
+                            "type" to server.type,
                             "nume" to server.nume,
                             "post" to server.post,
                         ),
@@ -780,6 +788,23 @@ class NontonAnimeIDProvider : MainAPI() {
 
         val html = res.text
         val doc = res.document
+
+        // Try decrypting Kotakanime encrypted script if present
+        val kotakM3u8 = KotakanimeidLink.decryptKotakScript(html)
+        if (!kotakM3u8.isNullOrBlank()) {
+            val tracks = runCatching { M3u8Helper.generateM3u8(serverLabel, kotakM3u8, url) }.getOrNull()
+            if (!tracks.isNullOrEmpty()) {
+                tracks.forEach(callback)
+                return
+            }
+            callback.invoke(
+                newExtractorLink(serverLabel, serverLabel, kotakM3u8, ExtractorLinkType.M3U8) {
+                    this.referer = url
+                    this.quality = detectQuality(serverLabel)
+                }
+            )
+            return
+        }
 
         doc.selectFirst("iframe")?.let { iframe ->
             val innerSrc = normalizeUrl(iframe.attr("data-src").ifEmpty { iframe.attr("src") })

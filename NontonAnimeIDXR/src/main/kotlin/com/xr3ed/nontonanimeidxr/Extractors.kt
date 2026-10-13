@@ -12,6 +12,8 @@ import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.extractors.VidStack
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 
 open class Gdplayer : ExtractorApi() {
     override val name = "Gdplayer"
@@ -72,83 +74,160 @@ class Nontonanimeid : Hxfile() {
     override val requiresReferer = true
 }
 
-class EmbedKotakAnimeid : Hxfile() {
-    override val name = "EmbedKotakAnimeid"
-    override val mainUrl = "https://embed2.kotakanimeid.com"
-    override val requiresReferer = true
-}
-
-class Kotaksb : Hxfile() {
-    override val name = "Kotaksb"
-    override val mainUrl = "https://kotaksb.fun"
-    override val requiresReferer = true
-}
-
-class KotakAnimeidCom : Hxfile() {
-    override val name = "KotakAnimeid"
-    override val mainUrl = "https://kotakanimeid.com"
-    override val requiresReferer = true
-}
-
-class KotakAnimeidLinkS1 : Hxfile() {
-    override val name = "KotakAnimeidLink"
-    override val mainUrl = "https://s1.kotakanimeid.link"
-    override val requiresReferer = true
-}
-
-class KotakAnimeidLinkS2 : Hxfile() {
-    override val name = "KotakAnimeidLink"
-    override val mainUrl = "https://s2.kotakanimeid.link"
-    override val requiresReferer = true
-}
-
-class KotakAnimeidLinkS3 : Hxfile() {
-    override val name = "KotakAnimeidLink"
-    override val mainUrl = "https://s3.kotakanimeid.link"
-    override val requiresReferer = true
-}
-
-class KotakAnimeidLinkRoot : Hxfile() {
-    override val name = "KotakAnimeidLink"
+open class KotakanimeidLink : ExtractorApi() {
+    override val name = "KotakAnimeID"
     override val mainUrl = "https://kotakanimeid.link"
     override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val pageReferer = referer?.takeIf { it.isNotBlank() } ?: "https://s13.nontonanimeid.boats/"
+        val res = app.get(
+            url,
+            referer = pageReferer,
+            headers = mapOf(
+                "User-Agent" to TurnstileInterceptor.USER_AGENT,
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            )
+        )
+        val html = res.text
+
+        val m3u8Url = decryptKotakScript(html)
+        if (!m3u8Url.isNullOrBlank()) {
+            val tracks = runCatching {
+                M3u8Helper.generateM3u8(
+                    source = name,
+                    streamUrl = m3u8Url,
+                    referer = url,
+                    headers = mapOf(
+                        "Referer" to url,
+                        "Origin" to (runCatching { java.net.URI(url).let { "${it.scheme}://${it.host}" } }.getOrNull() ?: "")
+                    )
+                )
+            }.getOrNull()
+
+            if (!tracks.isNullOrEmpty()) {
+                tracks.forEach(callback)
+                return
+            }
+
+            callback.invoke(
+                newExtractorLink(
+                    source = name,
+                    name = "$name 1080p",
+                    url = m3u8Url,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = url
+                    this.quality = Qualities.P1080.value
+                    this.headers = mapOf("Referer" to url)
+                }
+            )
+        }
+    }
+
+    companion object {
+        fun decryptKotakScript(html: String): String? {
+            return runCatching {
+                val sMatch = Regex("""var\s+s\s*=\s*['"]([0-9,]+)['"]\.split""").find(html) ?: return null
+                val sList = sMatch.groupValues[1].split(",")
+                val mulMatch = Regex("""parseInt\(s\[j\],(?:\s*10)?\)\s*-\s*(\d+)\s*\*\s*\(j\s*\+\s*(\d+)\)""").find(html) ?: return null
+                val mul = mulMatch.groupValues[1].toInt()
+                val add = mulMatch.groupValues[2].toInt()
+
+                val key = ByteArray(sList.size)
+                for (j in sList.indices) {
+                    val v = sList[j].trim().toInt() - mul * (j + add)
+                    key[j] = (v and 0xFF).toByte()
+                }
+
+                val b64Matches = Regex("""['"]([A-Za-z0-9+/=]{20,})['"]""").findAll(html)
+                val fullB64 = b64Matches.map { it.groupValues[1] }.joinToString("")
+                if (fullB64.isBlank()) return null
+
+                val raw = android.util.Base64.decode(fullB64, android.util.Base64.DEFAULT)
+                val dec = ByteArray(raw.size)
+                for (i in raw.indices) {
+                    dec[i] = (raw[i].toInt() xor key[i % key.size].toInt()).toByte()
+                }
+                val decText = String(dec, Charsets.UTF_8)
+                val m3u8Match = Regex(""""file"\s*:\s*"(https?://[^"]+index\.m3u8)"""").find(decText)
+                    ?: Regex("""https?://[^\s"'<>\\]+index\.m3u8""").find(decText)
+                m3u8Match?.groupValues?.getOrNull(1) ?: m3u8Match?.value
+            }.getOrNull()
+        }
+    }
 }
 
-class KotakvideoCom : Hxfile() {
+class EmbedKotakAnimeid : KotakanimeidLink() {
+    override val name = "EmbedKotakAnimeid"
+    override val mainUrl = "https://embed2.kotakanimeid.com"
+}
+
+class Kotaksb : KotakanimeidLink() {
+    override val name = "Kotaksb"
+    override val mainUrl = "https://kotaksb.fun"
+}
+
+class KotakAnimeidCom : KotakanimeidLink() {
+    override val name = "KotakAnimeid"
+    override val mainUrl = "https://kotakanimeid.com"
+}
+
+class KotakAnimeidLinkS1 : KotakanimeidLink() {
+    override val name = "KotakAnimeidLink"
+    override val mainUrl = "https://s1.kotakanimeid.link"
+}
+
+class KotakAnimeidLinkS2 : KotakanimeidLink() {
+    override val name = "KotakAnimeidLink"
+    override val mainUrl = "https://s2.kotakanimeid.link"
+}
+
+class KotakAnimeidLinkS3 : KotakanimeidLink() {
+    override val name = "KotakAnimeidLink"
+    override val mainUrl = "https://s3.kotakanimeid.link"
+}
+
+class KotakAnimeidLinkRoot : KotakanimeidLink() {
+    override val name = "KotakAnimeidLink"
+    override val mainUrl = "https://kotakanimeid.link"
+}
+
+class KotakvideoCom : KotakanimeidLink() {
     override val name = "Kotakvideo"
     override val mainUrl = "https://kotakvideo.com"
-    override val requiresReferer = true
 }
 
-class KotakvideoNet : Hxfile() {
+class KotakvideoNet : KotakanimeidLink() {
     override val name = "Kotakvideo"
     override val mainUrl = "https://kotakvideo.net"
-    override val requiresReferer = true
 }
 
-class StreamkuTv : Hxfile() {
+class StreamkuTv : KotakanimeidLink() {
     override val name = "Streamku"
     override val mainUrl = "https://streamku.tv"
-    override val requiresReferer = true
 }
 
-class StreamkuCom : Hxfile() {
+class StreamkuCom : KotakanimeidLink() {
     override val name = "Streamku"
     override val mainUrl = "https://streamku.com"
-    override val requiresReferer = true
 }
 
-class StreamkuNet : Hxfile() {
+class StreamkuNet : KotakanimeidLink() {
     override val name = "Streamku"
     override val mainUrl = "https://streamku.net"
-    override val requiresReferer = true
 }
 
-class StreamkuLive : Hxfile() {
+class StreamkuLive : KotakanimeidLink() {
     override val name = "Streamku"
     override val mainUrl = "https://streamku.live"
-    override val requiresReferer = true
 }
+
 
 class NontonkuCom : Hxfile() {
     override val name = "Nontonku"
