@@ -8,14 +8,21 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addKitsuId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.amap
+import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.nicehttp.NiceResponse
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import kotlinx.coroutines.runBlocking
 
 class NontonAnimeIDProvider : MainAPI() {
     override var mainUrl = "https://s13.nontonanimeid.boats"
@@ -430,121 +437,465 @@ class NontonAnimeIDProvider : MainAPI() {
         val cleanData = unmaskUrl(data)
         val req = runCatching { request(cleanData) }.getOrNull() ?: return false
         val document = req.document
-        val iframeLinks = linkedSetOf<String>()
+        val htmlText = req.text
 
-        fun normalizeUrl(value: String?): String? {
-            val raw = value
-                ?.trim()
-                ?.replace("\\/", "/")
-                ?.replace("&amp;", "&")
-                ?.takeIf { it.isNotBlank() }
-                ?: return null
-            return when {
-                raw.startsWith("about:") -> null
-                raw.startsWith("http://") || raw.startsWith("https://") -> raw
-                else -> fixUrl(raw)
+        // 1. Collect all server buttons from the web page
+        val serverButtons = document.select(
+            ".serverplayer, " +
+            ".container1 > ul > li, " +
+            "ul#server li, " +
+            "ul.player li, " +
+            ".player > li, " +
+            ".servers li, " +
+            ".servervideo li, " +
+            ".servervideo a, " +
+            ".server-item, " +
+            "[data-post][data-nume], " +
+            "[data-post][data-type]"
+        )
+
+        data class ServerItem(
+            val post: String,
+            val nume: String,
+            val type: String,
+            val label: String,
+            val isActive: Boolean
+        )
+
+        val parsedServers = mutableListOf<ServerItem>()
+        val seenServerKeys = mutableSetOf<String>()
+
+        serverButtons.forEach { el ->
+            val post = el.attr("data-post").ifBlank { el.attr("data-id") }
+            val nume = el.attr("data-nume").ifBlank { el.attr("data-num") }
+            val type = el.attr("data-type").ifBlank { el.attr("data-server") }.ifBlank { el.attr("data-name") }
+            val label = el.text().trim().replace(Regex("\\s+"), " ").removeSuffix(":").trim().ifBlank { type }
+            val isActive = el.hasClass("on") || el.hasClass("active") || el.hasClass("selected")
+
+            val key = "$post-$nume-${type.lowercase()}-${label.lowercase()}"
+            if (post.isNotBlank() && nume.isNotBlank() && seenServerKeys.add(key)) {
+                parsedServers.add(ServerItem(post, nume, type, label, isActive))
             }
         }
 
-        fun collectIframes(doc: Document) {
-            doc.select("iframe").forEach { iframe ->
-                normalizeUrl(iframe.attr("data-src").ifEmpty { iframe.attr("data-litespeed-src") }.ifEmpty { iframe.attr("src") })
-                    ?.let { iframeLinks.add(it) }
-            }
+        // Active server label on initial load (matches the active button or first button)
+        val activeServer = parsedServers.firstOrNull { it.isActive } ?: parsedServers.firstOrNull()
+        val defaultActiveLabel = activeServer?.label ?: "Server Video"
+
+        // Collect initial iframes from main document
+        val initialIframes = mutableListOf<String>()
+        document.select("iframe").forEach { iframe ->
+            val src = iframe.attr("data-src").ifEmpty { iframe.attr("data-litespeed-src") }.ifEmpty { iframe.attr("src") }
+            normalizeUrl(src)?.let { initialIframes.add(it) }
         }
 
-        collectIframes(document)
+        // Map of serverLabel -> Set of embed URLs
+        val serverToUrls = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
 
-        val extraScriptElement = document.selectFirst("script#ajax_video-js-extra")
-        val ajaxConfigScript = when {
-            extraScriptElement == null -> ""
-            extraScriptElement.hasAttr("src") && extraScriptElement.attr("src").contains("base64,") -> {
-                base64Decode(extraScriptElement.attr("src").substringAfter("base64,"))
-            }
-            else -> extraScriptElement.data().ifBlank { extraScriptElement.html() }
+        // Associate initial iframes with the active server
+        if (initialIframes.isNotEmpty()) {
+            serverToUrls.getOrPut(defaultActiveLabel) { mutableSetOf() }.addAll(initialIframes)
         }
 
-        val ajaxUrl = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"")
-            .find(ajaxConfigScript)
+        // Find AJAX config (nonce & ajaxUrl)
+        val allScripts = document.select("script").joinToString("\n") { it.data().ifBlank { it.html() } }
+        var ajaxUrl = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"")
+            .find(allScripts)
             ?.groupValues
             ?.getOrNull(1)
             ?.replace("\\/", "/")
             ?.let { fixUrl(it) }
             ?: "$mainUrl/wp-admin/admin-ajax.php"
 
-        val nonce = Regex("\"nonce\"\\s*:\\s*\"([^\"]+)\"")
-            .find(ajaxConfigScript)
+        var nonce = Regex("\"nonce\"\\s*:\\s*\"([^\"]+)\"")
+            .find(allScripts)
             ?.groupValues
             ?.getOrNull(1)
 
-        if (!nonce.isNullOrBlank()) {
-            document.select(".serverplayer[data-post][data-type][data-nume], .container1 > ul > li[data-post][data-type][data-nume], ul#server li[data-post][data-type][data-nume]")
-                .forEach { serverItem ->
-                    val dataPost = serverItem.attr("data-post")
-                    val dataNume = serverItem.attr("data-nume")
-                    val serverName = serverItem.attr("data-type").lowercase()
-                    if (dataPost.isBlank() || dataNume.isBlank() || serverName.isBlank()) return@forEach
+        if (nonce.isNullOrBlank()) {
+            nonce = Regex("""(?:nonce|ajax_nonce)["']?\s*:\s*["']([^"']+)["']""").find(htmlText)?.groupValues?.getOrNull(1)
+        }
 
-                    val response = runCatching {
-                        app.post(
-                            url = ajaxUrl,
-                            interceptor = turnstileInterceptor,
-                            data = mapOf(
-                                "action" to "player_ajax",
-                                "nonce" to nonce,
-                                "serverName" to serverName,
-                                "nume" to dataNume,
-                                "post" to dataPost,
-                            ),
-                            referer = cleanData,
-                            headers = mapOf(
-                                "X-Requested-With" to "XMLHttpRequest",
-                                "Origin" to mainUrl,
-                                "User-Agent" to TurnstileInterceptor.USER_AGENT,
-                            )
-                        ).text
-                    }.getOrNull()
+        // If nonce found, query AJAX for all server buttons concurrently
+        if (!nonce.isNullOrBlank() && parsedServers.isNotEmpty()) {
+            parsedServers.amap { server ->
+                val response = runCatching {
+                    app.post(
+                        url = ajaxUrl,
+                        interceptor = turnstileInterceptor,
+                        data = mapOf(
+                            "action" to "player_ajax",
+                            "nonce" to nonce,
+                            "serverName" to server.type.lowercase(),
+                            "type" to server.type.lowercase(),
+                            "nume" to server.nume,
+                            "post" to server.post,
+                        ),
+                        referer = cleanData,
+                        headers = mapOf(
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Origin" to mainUrl,
+                            "User-Agent" to TurnstileInterceptor.USER_AGENT,
+                        )
+                    ).text
+                }.getOrNull()
 
-                    if (!response.isNullOrBlank()) {
-                        collectIframes(Jsoup.parse(response))
+                if (!response.isNullOrBlank()) {
+                    val urls = extractEmbedUrls(response)
+                    if (urls.isNotEmpty()) {
+                        serverToUrls.getOrPut(server.label) { mutableSetOf() }.addAll(urls)
                     }
                 }
-        }
-
-        iframeLinks.toList().amap { link ->
-            val nestedLink = if (link.contains("/video-frame/") || link.contains("/video-embed/")) {
-                runCatching {
-                    app.get(
-                        url = link,
-                        referer = cleanData,
-                        headers = mapOf("User-Agent" to TurnstileInterceptor.USER_AGENT)
-                    ).document.selectFirst("iframe")?.let { iframe ->
-                        normalizeUrl(iframe.attr("data-src").ifEmpty { iframe.attr("src") })
-                    }
-                }.getOrNull()
-            } else {
-                null
             }
-            loadExtractor(nestedLink ?: link, "$mainUrl/", subtitleCallback, callback)
         }
 
+        // Resolve each server's streams
+        serverToUrls.entries.toList().amap { (label, urls) ->
+            urls.toList().amap { url ->
+                resolveServerStream(url, label, cleanData, subtitleCallback, callback)
+            }
+        }
+
+        // Extract download section links as well
         document.select(".listlink a, .download-link a, .dlx a, .soraurlx a").amap { a ->
             val href = normalizeUrl(a.attr("href"))
+            val dlLabel = a.text().trim().ifBlank { "Download" }
             if (href != null && !href.contains("javascript", true)) {
-                try {
-                    val realUrl = app.get(href, allowRedirects = true).url
-                    if (realUrl != href && realUrl.isNotBlank()) {
-                        loadExtractor(realUrl, "$mainUrl/", subtitleCallback, callback)
-                    } else {
-                        loadExtractor(href, "$mainUrl/", subtitleCallback, callback)
-                    }
-                } catch (_: Exception) {
-                    loadExtractor(href, "$mainUrl/", subtitleCallback, callback)
-                }
+                val realUrl = runCatching {
+                    val r = app.get(href, allowRedirects = true).url
+                    if (r.isNotBlank() && r != href) r else href
+                }.getOrDefault(href)
+
+                resolveServerStream(realUrl, dlLabel, "$mainUrl/", subtitleCallback, callback)
             }
         }
 
         return true
+    }
+
+    private fun normalizeUrl(value: String?): String? {
+        val raw = value
+            ?.trim()
+            ?.replace("\\/", "/")
+            ?.replace("&amp;", "&")
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        return when {
+            raw.startsWith("about:") -> null
+            raw.startsWith("http://") || raw.startsWith("https://") -> raw
+            raw.startsWith("//") -> "https:$raw"
+            else -> fixUrl(raw)
+        }
+    }
+
+    private fun extractEmbedUrls(rawText: String): List<String> {
+        val results = mutableListOf<String>()
+        val cleanRaw = rawText.replace("\\/", "/").replace("&amp;", "&")
+
+        if (cleanRaw.trim().startsWith("{") && cleanRaw.trim().endsWith("}")) {
+            Regex(""""(?:html|embed_url|url|src|file|data)":\s*"([^"]+)"""")
+                .findAll(cleanRaw)
+                .forEach { match ->
+                    val v = match.groupValues[1].replace("\\/", "/").replace("&amp;", "&")
+                    normalizeUrl(v)?.let { results.add(it) }
+                }
+        }
+
+        val doc = Jsoup.parse(cleanRaw)
+        doc.select("iframe").forEach { iframe ->
+            val src = iframe.attr("data-src").ifEmpty { iframe.attr("data-litespeed-src") }.ifEmpty { iframe.attr("src") }
+            normalizeUrl(src)?.let { results.add(it) }
+        }
+        doc.select("source, video").forEach { v ->
+            val src = v.attr("src").ifEmpty { v.attr("data-src") }
+            normalizeUrl(src)?.let { results.add(it) }
+        }
+
+        if (results.isEmpty()) {
+            Regex("""https?://[^\s"'<>\\]+""").findAll(cleanRaw).forEach { match ->
+                val u = match.value
+                if (u.contains(".m3u8") || u.contains(".mp4") || u.contains("/embed") || u.contains("/v/") || u.contains("/e/") || u.contains("video")) {
+                    normalizeUrl(u)?.let { results.add(it) }
+                }
+            }
+        }
+        return results.distinct()
+    }
+
+    private suspend fun unwrapIntermediateUrl(url: String, referer: String): String {
+        var currentUrl = url
+        for (i in 0 until 3) {
+            if (!currentUrl.contains("/video-frame/") && !currentUrl.contains("/video-embed/") && !currentUrl.contains("/embed/")) {
+                break
+            }
+            val nextUrl = runCatching {
+                val resp = app.get(
+                    url = currentUrl,
+                    referer = referer,
+                    headers = mapOf("User-Agent" to TurnstileInterceptor.USER_AGENT)
+                )
+                val doc = resp.document
+                val innerIframe = doc.selectFirst("iframe")?.let {
+                    normalizeUrl(it.attr("data-src").ifEmpty { it.attr("data-litespeed-src") }.ifEmpty { it.attr("src") })
+                }
+                innerIframe
+            }.getOrNull()
+
+            if (!nextUrl.isNullOrBlank() && nextUrl != currentUrl) {
+                currentUrl = nextUrl
+            } else {
+                break
+            }
+        }
+        return currentUrl
+    }
+
+    private suspend fun resolveServerStream(
+        initialEmbedUrl: String,
+        serverLabel: String,
+        pageReferer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        var foundAny = false
+        val seenStreamUrls = HashSet<String>()
+
+        val proxyCallback: (ExtractorLink) -> Unit = { rawLink ->
+            val cleanStreamUrl = rawLink.url.trim()
+            if (cleanStreamUrl.isNotBlank() && seenStreamUrls.add(cleanStreamUrl)) {
+                foundAny = true
+                val isM3u8 = rawLink.type == ExtractorLinkType.M3U8 || cleanStreamUrl.contains(".m3u8", ignoreCase = true)
+                var handledMulti = false
+                if (isM3u8) {
+                    val multiTracks = runCatching {
+                        runBlocking {
+                            M3u8Helper.generateM3u8(
+                                source = serverLabel,
+                                streamUrl = cleanStreamUrl,
+                                referer = if (rawLink.referer.isNotBlank()) rawLink.referer else pageReferer,
+                                headers = rawLink.headers
+                            )
+                        }
+                    }.getOrNull()
+
+                    if (!multiTracks.isNullOrEmpty()) {
+                        handledMulti = true
+                        multiTracks.forEach { track ->
+                            val trackQualityStr = Qualities.getStringByInt(track.quality)
+                            runBlocking {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = serverLabel,
+                                        name = "$serverLabel $trackQualityStr",
+                                        url = track.url,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        this.referer = track.referer
+                                        this.quality = track.quality
+                                        this.headers = track.headers
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (!handledMulti) {
+                    val qualityInt = if (rawLink.quality > 0) rawLink.quality else detectQuality(serverLabel)
+                    val qualityLabel = if (qualityInt > 0) " " + Qualities.getStringByInt(qualityInt) else ""
+                    runBlocking {
+                        callback.invoke(
+                            newExtractorLink(
+                                source = serverLabel,
+                                name = "$serverLabel$qualityLabel",
+                                url = cleanStreamUrl,
+                                type = rawLink.type
+                            ) {
+                                this.referer = if (rawLink.referer.isNotBlank()) rawLink.referer else pageReferer
+                                this.quality = qualityInt
+                                this.headers = rawLink.headers
+                                this.extractorData = rawLink.extractorData
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        val resolvedUrl = unwrapIntermediateUrl(initialEmbedUrl, pageReferer)
+
+        runCatching {
+            loadExtractor(resolvedUrl, pageReferer, subtitleCallback, proxyCallback)
+        }
+
+        if (foundAny) return
+
+        extractDeepVideo(resolvedUrl, serverLabel, pageReferer, subtitleCallback, proxyCallback)
+    }
+
+    private suspend fun extractDeepVideo(
+        url: String,
+        serverLabel: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (url.endsWith(".m3u8", ignoreCase = true) || url.contains(".m3u8?", ignoreCase = true)) {
+            val tracks = runCatching {
+                M3u8Helper.generateM3u8(serverLabel, url, referer)
+            }.getOrNull()
+            if (!tracks.isNullOrEmpty()) {
+                tracks.forEach(callback)
+                return
+            }
+            callback.invoke(
+                newExtractorLink(serverLabel, serverLabel, url, ExtractorLinkType.M3U8) {
+                    this.referer = referer
+                    this.quality = detectQuality(serverLabel)
+                }
+            )
+            return
+        }
+
+        if (url.endsWith(".mp4", ignoreCase = true) || url.contains(".mp4?", ignoreCase = true)) {
+            callback.invoke(
+                newExtractorLink(serverLabel, serverLabel, url, ExtractorLinkType.VIDEO) {
+                    this.referer = referer
+                    this.quality = detectQuality(serverLabel)
+                }
+            )
+            return
+        }
+
+        val res = runCatching {
+            app.get(
+                url = url,
+                referer = referer,
+                headers = mapOf(
+                    "User-Agent" to TurnstileInterceptor.USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
+            )
+        }.getOrNull() ?: return
+
+        val html = res.text
+        val doc = res.document
+
+        doc.selectFirst("iframe")?.let { iframe ->
+            val innerSrc = normalizeUrl(iframe.attr("data-src").ifEmpty { iframe.attr("src") })
+            if (!innerSrc.isNullOrBlank() && innerSrc != url) {
+                runCatching {
+                    loadExtractor(innerSrc, url, subtitleCallback, callback)
+                }
+            }
+        }
+
+        for (el in doc.select("video source[src], video[src], source[src]")) {
+            val src = normalizeUrl(el.attr("src"))
+            if (!src.isNullOrBlank()) {
+                val isM3u8 = src.contains(".m3u8", ignoreCase = true)
+                val type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                if (isM3u8) {
+                    val tracks = runCatching { M3u8Helper.generateM3u8(serverLabel, src, url) }.getOrNull()
+                    if (!tracks.isNullOrEmpty()) {
+                        tracks.forEach(callback)
+                        continue
+                    }
+                }
+                callback.invoke(
+                    newExtractorLink(serverLabel, serverLabel, src, type) {
+                        this.referer = url
+                        this.quality = detectQuality(serverLabel)
+                    }
+                )
+            }
+        }
+
+        val scriptContents = mutableListOf<String>()
+        doc.select("script").forEach { s ->
+            val d = s.data().ifBlank { s.html() }
+            if (d.isNotBlank()) {
+                scriptContents.add(d)
+                if (d.contains("eval(function(p,a,c,k,e,d)")) {
+                    runCatching { getAndUnpack(d) }.getOrNull()?.let { scriptContents.add(it) }
+                }
+            }
+        }
+        if (html.contains("eval(function(p,a,c,k,e,d)")) {
+            runCatching { getAndUnpack(html) }.getOrNull()?.let { scriptContents.add(it) }
+        }
+
+        for (content in scriptContents) {
+            val matches = Regex("""(?:file|source|videoURL|video_url|src)\s*:\s*["'](https?://[^"']+)["']""").findAll(content)
+            for (m in matches) {
+                val candidate = m.groupValues[1].replace("\\/", "/")
+                if (candidate.isNotBlank() && (candidate.contains(".m3u8") || candidate.contains(".mp4") || candidate.contains("/stream/") || candidate.contains("/hls/"))) {
+                    val isM3u8 = candidate.contains(".m3u8", ignoreCase = true)
+                    val type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    if (isM3u8) {
+                        val tracks = runCatching { M3u8Helper.generateM3u8(serverLabel, candidate, url) }.getOrNull()
+                        if (!tracks.isNullOrEmpty()) {
+                            tracks.forEach(callback)
+                            continue
+                        }
+                    }
+                    callback.invoke(
+                        newExtractorLink(serverLabel, serverLabel, candidate, type) {
+                            this.referer = url
+                            this.quality = detectQuality(serverLabel)
+                        }
+                    )
+                }
+            }
+
+            val sourcesJsonMatch = Regex("""sources\s*:\s*(\[[^\]]+\])""").find(content)?.groupValues?.getOrNull(1)
+            if (!sourcesJsonMatch.isNullOrBlank()) {
+                val fileMatches = Regex("""(?:file|src)\s*:\s*["']([^"']+)["']""").findAll(sourcesJsonMatch)
+                for (fm in fileMatches) {
+                    val f = fm.groupValues[1].replace("\\/", "/")
+                    if (f.startsWith("http")) {
+                        val isM3u8 = f.contains(".m3u8", ignoreCase = true)
+                        val type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        if (isM3u8) {
+                            val tracks = runCatching { M3u8Helper.generateM3u8(serverLabel, f, url) }.getOrNull()
+                            if (!tracks.isNullOrEmpty()) {
+                                tracks.forEach(callback)
+                                continue
+                            }
+                        }
+                        callback.invoke(
+                            newExtractorLink(serverLabel, serverLabel, f, type) {
+                                this.referer = url
+                                this.quality = detectQuality(serverLabel)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun detectQuality(str: String?): Int {
+        if (str.isNullOrBlank()) return Qualities.Unknown.value
+        val numMatch = Regex("""(\d{3,4})[pP]""").find(str)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (numMatch != null) {
+            return when {
+                numMatch >= 2160 -> Qualities.P2160.value
+                numMatch >= 1080 -> Qualities.P1080.value
+                numMatch >= 720 -> Qualities.P720.value
+                numMatch >= 480 -> Qualities.P480.value
+                numMatch >= 360 -> Qualities.P360.value
+                else -> numMatch
+            }
+        }
+        return when {
+            str.contains("4k", ignoreCase = true) || str.contains("2160", ignoreCase = true) || str.contains("uhd", ignoreCase = true) -> Qualities.P2160.value
+            str.contains("1080", ignoreCase = true) || str.contains("fhd", ignoreCase = true) -> Qualities.P1080.value
+            str.contains("720", ignoreCase = true) || str.contains("hd", ignoreCase = true) -> Qualities.P720.value
+            str.contains("480", ignoreCase = true) || str.contains("sd", ignoreCase = true) -> Qualities.P480.value
+            str.contains("360", ignoreCase = true) -> Qualities.P360.value
+            else -> Qualities.Unknown.value
+        }
     }
 
     private fun getBaseUrl(url: String): String {

@@ -102,6 +102,66 @@ class KotakAnimeidLinkS2 : Hxfile() {
     override val requiresReferer = true
 }
 
+class KotakAnimeidLinkS3 : Hxfile() {
+    override val name = "KotakAnimeidLink"
+    override val mainUrl = "https://s3.kotakanimeid.link"
+    override val requiresReferer = true
+}
+
+class KotakAnimeidLinkRoot : Hxfile() {
+    override val name = "KotakAnimeidLink"
+    override val mainUrl = "https://kotakanimeid.link"
+    override val requiresReferer = true
+}
+
+class KotakvideoCom : Hxfile() {
+    override val name = "Kotakvideo"
+    override val mainUrl = "https://kotakvideo.com"
+    override val requiresReferer = true
+}
+
+class KotakvideoNet : Hxfile() {
+    override val name = "Kotakvideo"
+    override val mainUrl = "https://kotakvideo.net"
+    override val requiresReferer = true
+}
+
+class StreamkuTv : Hxfile() {
+    override val name = "Streamku"
+    override val mainUrl = "https://streamku.tv"
+    override val requiresReferer = true
+}
+
+class StreamkuCom : Hxfile() {
+    override val name = "Streamku"
+    override val mainUrl = "https://streamku.com"
+    override val requiresReferer = true
+}
+
+class StreamkuNet : Hxfile() {
+    override val name = "Streamku"
+    override val mainUrl = "https://streamku.net"
+    override val requiresReferer = true
+}
+
+class StreamkuLive : Hxfile() {
+    override val name = "Streamku"
+    override val mainUrl = "https://streamku.live"
+    override val requiresReferer = true
+}
+
+class NontonkuCom : Hxfile() {
+    override val name = "Nontonku"
+    override val mainUrl = "https://nontonku.com"
+    override val requiresReferer = true
+}
+
+class NontonkuOrg : Hxfile() {
+    override val name = "Nontonku"
+    override val mainUrl = "https://nontonku.org"
+    override val requiresReferer = true
+}
+
 class Vidhidepre : Filesim() {
     override val name = "Vidhidepre"
     override var mainUrl = "https://vidhidepre.com"
@@ -110,5 +170,29 @@ class Vidhidepre : Filesim() {
 class Rpmvip : VidStack() {
     override var name = "Rpmvip"
     override var mainUrl = "https://s1.rpmvip.com"
+    override var requiresReferer = true
+}
+
+class RpmvipS2 : VidStack() {
+    override var name = "Rpmvip"
+    override var mainUrl = "https://s2.rpmvip.com"
+    override var requiresReferer = true
+}
+
+class RpmvipS3 : VidStack() {
+    override var name = "Rpmvip"
+    override var mainUrl = "https://s3.rpmvip.com"
+    override var requiresReferer = true
+}
+
+class RpmvipVip : VidStack() {
+    override var name = "Rpmvip"
+    override var mainUrl = "https://vip.rpmvip.com"
+    override var requiresReferer = true
+}
+
+class RpmvipRoot : VidStack() {
+    override var name = "Rpmvip"
+    override var mainUrl = "https://rpmvip.com"
     override var requiresReferer = true
 }
