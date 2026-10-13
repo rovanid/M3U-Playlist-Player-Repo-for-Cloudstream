@@ -1,0 +1,82 @@
+name: Auto Patch & Build
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # tiap hari 03:00 UTC
+  workflow_dispatch:       # tombol "Run workflow" manual
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: xr3ed/M3U-Playlist-Player-Repo-for-Cloudstream
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Ambil kode terbaru dari upstream (selalu fresh, tanpa konflik merge)
+      - name: Checkout upstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: main
+
+      # 2. Hapus SecurityHelper secara otomatis
+      - name: Remove SecurityHelper
+        run: |
+          echo "=== Pemakaian SecurityHelper SEBELUM dihapus ==="
+          grep -rn "SecurityHelper" --include=*.kt . || true
+
+          # hapus file helper-nya
+          find . -name "SecurityHelper*.kt" -delete
+
+          # hapus baris yang memanggilnya
+          grep -rl "SecurityHelper" --include=*.kt . | xargs -r sed -i '/SecurityHelper/d'
+
+          echo "=== Sisa referensi (harus kosong) ==="
+          grep -rn "SecurityHelper" --include=*.kt . || echo "bersih"
+
+      # 3. Arahkan URL repo di build ke fork kamu
+      - name: Point repo URL to this fork
+        run: |
+          sed -i "s#${{ env.UPSTREAM }}#${{ github.repository }}#g" build.gradle.kts
+
+      # 4. Secrets opsional (isi di Settings > Secrets kalau punya)
+      - name: Create local.properties
+        run: |
+          {
+            echo "RBTV_MAIN_URL=${{ secrets.RBTV_MAIN_URL }}"
+            echo "RBTV_API_HOST=${{ secrets.RBTV_API_HOST }}"
+            echo "RBTV_GIST_URL=${{ secrets.RBTV_GIST_URL }}"
+          } > local.properties
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build
+        run: |
+          chmod +x gradlew
+          ./gradlew make makePluginsJson
+
+      # 5. Kumpulkan hasil build
+      - name: Collect output
+        run: |
+          mkdir -p out
+          find . -name "*.cs3" -path "*build*" -exec cp {} out/ \;
+          cp build/plugins.json out/ 2>/dev/null || true
+          ls -la out
+
+      # 6. Publish ke branch "builds" di fork kamu
+      - name: Publish to builds branch
+        run: |
+          cd out
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -q -b builds
+          git add -A
+          git commit -q -m "Auto build $(date -u +'%Y-%m-%d %H:%M')"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" builds
