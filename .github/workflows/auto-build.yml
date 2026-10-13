@@ -25,17 +25,17 @@ jobs:
       # 2. Hapus SecurityHelper secara otomatis
       - name: Remove SecurityHelper
         run: |
-          echo "=== Pemakaian SecurityHelper SEBELUM dihapus ==="
-          grep -rn "SecurityHelper" --include=*.kt . || true
+          echo "=== Pemakaian SecurityHelper/verifyApp SEBELUM dihapus ==="
+          grep -rnE "SecurityHelper|verifyApp" --include=*.kt . || true
 
           # hapus file helper-nya
           find . -name "SecurityHelper*.kt" -delete
 
-          # hapus baris yang memanggilnya
-          grep -rl "SecurityHelper" --include=*.kt . | xargs -r sed -i '/SecurityHelper/d'
+          # hapus baris yang memanggilnya (import + pemanggilan)
+          grep -rlE "SecurityHelper|verifyApp" --include=*.kt . | xargs -r sed -i -E '/SecurityHelper|verifyApp/d'
 
           echo "=== Sisa referensi (harus kosong) ==="
-          grep -rn "SecurityHelper" --include=*.kt . || echo "bersih"
+          grep -rnE "SecurityHelper|verifyApp" --include=*.kt . || echo "bersih"
 
       # 3. Arahkan URL repo di build ke fork kamu
       - name: Point repo URL to this fork
