@@ -38,6 +38,10 @@ jobs:
           echo "=== Sisa referensi (harus kosong) ==="
           grep -rnE "SecurityHelper|verifyApp" --include=*.kt --include=*.java --include=*.kts . || echo "bersih"
 
+      # 2b. Buang binary prebuilt upstream (tanpa source, tidak bisa dibersihkan)
+      - name: Remove upstream prebuilts
+        run: rm -rf prebuilts
+
       # 3. Arahkan URL repo di build ke fork kamu
       - name: Point repo URL to this fork
         run: |
@@ -176,18 +180,23 @@ jobs:
             echo "Error: plugins.json not found in build/ directory!" && exit 1
           fi
 
-      # 5b. Cek apakah SecurityHelper masih ada di dalam file .cs3 hasil akhir
-      - name: Scan cs3 for SecurityHelper
+      # 5b. Gerbang akhir: build GAGAL (tidak dipublish) jika SecurityHelper masih ada di .cs3
+      - name: Verify no SecurityHelper in cs3
         run: |
-          echo "=== Scan SecurityHelper di build-out/*.cs3 ==="
+          found=0
           for f in build-out/*.cs3; do
             n=$(unzip -p "$f" 'classes*.dex' 2>/dev/null | grep -a -c "SecurityHelper" || true)
             if [ "$n" -gt 0 ]; then
               echo "MASIH ADA  : $(basename "$f")"
+              found=1
             else
               echo "bersih     : $(basename "$f")"
             fi
           done
+          if [ "$found" -eq 1 ]; then
+            echo "Build dibatalkan: SecurityHelper masih ditemukan."
+            exit 1
+          fi
 
       # 6. Publish ke branch "builds" di fork kamu + tag + bersihkan tag lama
       - name: Deploy to builds Branch
