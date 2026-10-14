@@ -23,6 +23,8 @@ import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
+private const val MIRROR_TIMEOUT_MS = 25_000L
+
 class AnimeSailProvider : MainAPI() {
     override var mainUrl = "https://v1.animesail.xyz"
     override var name = "#Anime AnimesailXR"
@@ -283,11 +285,17 @@ class AnimeSailProvider : MainAPI() {
             }
         }
         val cleanData = if (data.contains("lynk.id")) data.substringAfterLast("#", "") else data
-        val document = request(cleanData).document
+        // Coba ulang bila halaman gagal dimuat sementara (timeout/5xx), agar tidak langsung "tidak ada link"
+        val document = retrying {
+            val res = request(cleanData)
+            if (res.code !in 200..299) throw java.io.IOException("HTTP ${res.code}")
+            res.document
+        }
         val playerPath = "$mainUrl/utils/player/"
 
         document.select(".mobius > .mirror > option").amap { element ->
-            safeApiCall {
+            // Satu mirror yang menggantung tidak boleh menahan mirror lain / penyelesaian loadLinks
+            kotlinx.coroutines.withTimeoutOrNull(MIRROR_TIMEOUT_MS) { safeApiCall {
                 val encodedData = element.attr("data-em")
                 if (encodedData.isBlank()) return@safeApiCall
 
@@ -383,9 +391,24 @@ class AnimeSailProvider : MainAPI() {
                         loadFixedExtractor(iframe, serverName, quality, mainUrl, subtitleCallback, filteredCallback)
                     }
                 }
-            }
+            } }
         }
         return true
+    }
+
+    private suspend fun <T> retrying(times: Int = 3, baseDelayMs: Long = 600, block: suspend () -> T): T {
+        var last: Throwable? = null
+        for (attempt in 0 until times) {
+            try {
+                return block()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                last = e
+                if (attempt < times - 1) kotlinx.coroutines.delay(baseDelayMs * (attempt + 1))
+            }
+        }
+        throw last ?: IllegalStateException("retrying failed")
     }
 
     private suspend fun loadFixedExtractor(
