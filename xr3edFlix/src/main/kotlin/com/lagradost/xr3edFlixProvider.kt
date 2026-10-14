@@ -37,6 +37,8 @@ import java.net.URLEncoder
 
 class xr3edFlixProvider : MainAPI() {
     companion object {
+        /** Batas waktu per extractor agar satu sumber lambat tidak menahan semua link. */
+        const val EXTRACTOR_TIMEOUT_MS = 30_000L
         val addedUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         val addedSourceQualities = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         private val titleSearchCache = java.util.concurrent.ConcurrentHashMap<String, SearchResponse>()
@@ -685,14 +687,31 @@ class xr3edFlixProvider : MainAPI() {
         }
     }
 
+    /**
+     * Menjalankan satu extractor secara terisolasi: batas waktu sendiri, dan kegagalannya tidak
+     * membatalkan extractor lain. Tanpa ini, satu extractor yang melempar error di dalam
+     * coroutineScope membatalkan semua extractor saudaranya sehingga link yang sudah ketemu hilang,
+     * dan satu extractor yang menggantung membuat loadLinks tidak pernah selesai.
+     */
+    private suspend fun guarded(label: String, block: suspend () -> Unit) {
+        try {
+            val finished = kotlinx.coroutines.withTimeoutOrNull(EXTRACTOR_TIMEOUT_MS) { block(); true }
+            if (finished == null) Log.w("xr3edFlix", "Extractor $label timeout")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.e("xr3edFlix", "Extractor $label gagal: ${e.message}")
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        addedUrls.clear()
-        addedSourceQualities.clear()
+        val addedUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val addedSourceQualities = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         val cleanData = if (data.contains("::")) {
             val colonIdx = data.indexOf("::")
             val slashIdx = data.lastIndexOf('/', colonIdx)
@@ -711,7 +730,7 @@ class xr3edFlixProvider : MainAPI() {
         val seasonNum = if (type == "movie") null else parts.getOrNull(2)?.toIntOrNull()
         val episodeNum = if (type == "movie") null else parts.getOrNull(3)?.toIntOrNull()
 
-        var foundAny = false
+        val foundAny = java.util.concurrent.atomic.AtomicBoolean(false)
         val indonesianCount = java.util.concurrent.atomic.AtomicInteger(0)
         val englishCount = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -745,7 +764,7 @@ class xr3edFlixProvider : MainAPI() {
             val isForeign = NxshaExtractor.isForeignLanguage(link.name)
 
             if (!isDeadOrWarning && !isForeign && addedUrls.add(link.url)) {
-                foundAny = true
+                foundAny.set(true)
                 val updatedLink = if (link.quality == Qualities.Unknown.value || link.quality == 0) {
                     val inferredQuality = when {
                         link.name.contains("1080") || link.url.contains("1080") -> Qualities.P1080.value
@@ -779,22 +798,34 @@ class xr3edFlixProvider : MainAPI() {
         coroutineScope {
             val jobs = listOf(
                 async {
-                    NxshaExtractor.invoke(tmdbId, imdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    guarded("NxshaExtractor") {
+                        NxshaExtractor.invoke(tmdbId, imdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    }
                 },
                 async {
-                    XpassExtractor.invoke(tmdbId, imdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    guarded("XpassExtractor") {
+                        XpassExtractor.invoke(tmdbId, imdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    }
                 },
                 async {
-                    MovieBoxExtractor.invoke(title, seasonNum, episodeNum, subCallback, wrappedCallback, altTitle)
+                    guarded("MovieBoxExtractor") {
+                        MovieBoxExtractor.invoke(title, seasonNum, episodeNum, subCallback, wrappedCallback, altTitle)
+                    }
                 },
                 async {
-                    VaplayerExtractor.invoke(tmdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    guarded("VaplayerExtractor") {
+                        VaplayerExtractor.invoke(tmdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    }
                 },
                 async {
-                    VidnestExtractor.invoke(tmdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    guarded("VidnestExtractor") {
+                        VidnestExtractor.invoke(tmdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    }
                 },
                 async {
-                    EmbedExtractors.invoke(tmdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    guarded("EmbedExtractors") {
+                        EmbedExtractors.invoke(tmdbId, seasonNum, episodeNum, subCallback, wrappedCallback)
+                    }
                 },
                 async {
                     try {
@@ -854,7 +885,7 @@ class xr3edFlixProvider : MainAPI() {
             jobs.awaitAll()
         }
 
-        return foundAny
+        return foundAny.get()
     }
 
     // JSON Data classes for TMDB API
