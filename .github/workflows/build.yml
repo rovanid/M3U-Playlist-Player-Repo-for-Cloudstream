@@ -23,6 +23,19 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      # 1b. Overlay perubahan dari repo ini
+      - name: Overlay perubahan dari repo ini
+        uses: actions/checkout@v4
+        with:
+          path: _fork
+
+      - name: Terapkan overlay
+        run: |
+          for d in MyHomepage xr3edFlix AnimeSailXR; do
+            [ -d "_fork/$d" ] && cp -r "_fork/$d/." "$d/"
+          done
+          rm -rf _fork
+
       # 2. Hapus SecurityHelper secara otomatis
       - name: Remove SecurityHelper
         run: |
